@@ -32,7 +32,6 @@ Pick a region that supports the model family you want (portal lists availability
 AOAI_RESOURCE_GROUP="openai-rg"
 AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
 AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
-UAMI_NAME="aca-openai-uami"
 
 az group create -n "$AOAI_RESOURCE_GROUP" -l "$AOAI_LOCATION"
 
@@ -94,6 +93,7 @@ APP_NAME="aca-openai-api"
 ACR_NAME="acaworkshop$RANDOM"            # If you need a new registry
 IMAGE_NAME="openaiapi"
 IMAGE_TAG="v1"
+UAMI_NAME="aca-openai-uami"
 AOAI_API_VERSION="2024-08-01-preview"     # Use a supported api-version
 ```
 
@@ -108,14 +108,21 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
 
+## Create User Assigned Managed Identity (MUST happen before role assignments)
+```bash
+az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
+UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
+UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
+UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
+```
+> WARNING: If you skip this step and try to reference the identity's principalId later (for ACR or OpenAI role assignments) you will get a `ResourceNotFound` error.
+
 ### Grant the Managed Identity ACR Pull Permission
 Unlike AKS (where `az aks update -n CLUSTER -g RG --attach-acr ACR_NAME` wires up the cluster's kubelet identity automatically), Azure Container Apps requires you to explicitly assign the `AcrPull` role to the user‑assigned managed identity when you rely on that identity for image pulls.
 
-1. Capture IDs and assign `AcrPull`:
+1. Assign `AcrPull`:
 ```bash
 ACR_ID=$(az acr show -n "$ACR_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
-UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
-
 az role assignment create \
   --assignee-object-id $UAMI_PRINCIPAL_ID \
   --assignee-principal-type ServicePrincipal \
@@ -128,13 +135,6 @@ az role assignment list --assignee $UAMI_PRINCIPAL_ID --scope $ACR_ID -o table
 ```
 
 > Why this step? Container Apps only auto-resolves registry credentials if: (a) admin credentials are enabled (we disabled them for security), or (b) you specify a managed identity with the proper role via `--registry-identity`. The role assignment makes the identity authorized; specifying it during create tells the platform which identity to use.
-
-## Create User Assigned Managed Identity
-```bash
-az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
-UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
-UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
-```
 
 ## Assign Azure OpenAI Role (RBAC for Managed Identity)
 Grant the managed identity the least-privilege role needed to invoke completions: `Cognitive Services OpenAI User`.
