@@ -1,14 +1,10 @@
-# Exercise 1: From App Service Web API to Azure Container Apps
+# Exercise 1: From App Service Web API to Azure Container Apps (Python Version)
 
-(Formerly the single workshop guide.) This exercise walks you through containerizing a simple Web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
+This exercise walks you through containerizing a simple Python FastAPI web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
 
 > Estimated time: 45–60 minutes
 
 ---
-
-_The content is identical to the original workshop. If you later need a shorter version, you can trim sections here._
-
-<!-- BEGIN ORIGINAL CONTENT -->
 
 This hands-on tutorial walks you through containerizing a simple Web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
 
@@ -23,10 +19,10 @@ This hands-on tutorial walks you through containerizing a simple Web API, pushin
 - Docker installed and running (for local image build)
 - (Optional) jq for nicer JSON parsing
 
-## Environment Variables (Customize These First)
+## Environment Variables
 ```bash
 RESOURCE_GROUP="aca-workshop-rg"
-LOCATION="westeurope"
+LOCATION="swedencentral"
 ACR_NAME="acaworkshop$RANDOM"
 APP_NAME="aca-webapi"
 ENV_NAME="aca-env"
@@ -38,47 +34,69 @@ FULL_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## 1. Create / Containerize a Simple Web API
-```bash
-mkdir src && cd src
-cat > Program.cs <<'EOF'
-var builder = WebApplication.CreateBuilder(args);
-var app = builder.Build();
-app.MapGet("/", () => Results.Ok(new { message = "Hello from Container Apps!" }));
-app.MapGet("/healthz", () => Results.Ok("OK"));
-app.MapGet("/slow", async () => { await Task.Delay(500); return Results.Ok("done"); });
-app.Run();
-EOF
-
-cat > Dockerfile <<'EOF'
-FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
-WORKDIR /src
-COPY . .
-RUN dotnet publish -c Release -o /out
-FROM mcr.microsoft.com/dotnet/aspnet:8.0
-WORKDIR /app
-COPY --from=build /out .
-ENV ASPNETCORE_URLS=http://0.0.0.0:8080
-EXPOSE 8080
-ENTRYPOINT ["dotnet", "src.dll"]
-EOF
-
-cat > src.csproj <<'EOF'
-<Project Sdk="Microsoft.NET.Sdk.Web">
-  <PropertyGroup>
-    <TargetFramework>net8.0</TargetFramework>
-    <Nullable>enable</Nullable>
-    <ImplicitUsings>enable</ImplicitUsings>
-  </PropertyGroup>
-</Project>
-EOF
-
-dotnet restore
-cd ..
+## 1. Create / Containerize a Simple Python FastAPI Web API
+Project layout (created for you in this repo now):
 ```
-### Build & Test
+app/
+  ├── main.py
+  ├── requirements.txt
+  └── Dockerfile
+```
+
+If starting from scratch you could create it with:
 ```bash
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./src
+mkdir app
+cat > app/requirements.txt <<'REQ'
+fastapi==0.111.0
+uvicorn==0.30.1
+pydantic==2.8.2
+REQ
+
+cat > app/main.py <<'PY'
+from fastapi import FastAPI
+from pydantic import BaseModel
+import uvicorn, asyncio
+
+app = FastAPI(title="ACA Workshop API", version="1.0.0")
+
+class SlowResponse(BaseModel):
+    status: str
+    detail: str
+
+@app.get("/")
+async def root():
+    return {"message": "Hello from Container Apps (Python)!"}
+
+@app.get("/healthz")
+async def health():
+    return {"status": "OK"}
+
+@app.get("/slow", response_model=SlowResponse)
+async def slow():
+    await asyncio.sleep(0.5)
+    return SlowResponse(status="done", detail="Completed after simulated delay")
+
+if __name__ == "__main__":
+    uvicorn.run(app, host="0.0.0.0", port=8080)
+PY
+
+cat > app/Dockerfile <<'DOCKER'
+FROM python:3.12-slim AS base
+ENV PYTHONDONTWRITEBYTECODE=1 \\
+    PYTHONUNBUFFERED=1 \\
+    PIP_NO_CACHE_DIR=1
+WORKDIR /app
+COPY app/requirements.txt ./requirements.txt
+RUN pip install --no-cache-dir -r requirements.txt
+COPY app/ .
+EXPOSE 8080
+CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
+DOCKER
+```
+
+### Build & Test Locally
+```bash
+docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./app
 docker run -it --rm -p 8080:8080 ${IMAGE_NAME}:${IMAGE_TAG}
 curl -s http://localhost:8080 | jq
 curl -s http://localhost:8080/healthz
@@ -124,9 +142,10 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --min-replicas 1 --max-replicas 10
 ```
 ## 7. New Version
+Update the message and redeploy:
 ```bash
-sed -i 's/Hello from Container Apps!/Hello from Container Apps v2!/' src/Program.cs
-docker build -t ${IMAGE_NAME}:v2 ./src
+sed -i "s/Hello from Container Apps (Python)!/Hello from Container Apps (Python) v2!/" app/main.py
+docker build -t ${IMAGE_NAME}:v2 ./app
 docker tag ${IMAGE_NAME}:v2 ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2
 docker push ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
