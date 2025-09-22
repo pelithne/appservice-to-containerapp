@@ -10,8 +10,6 @@ This exercise walks you through containerizing a simple Python FastAPI web API, 
 
 If you have not already cloned this workshop repository, do that first so you have the application source (`app/`), `Dockerfile`, and exercise guides locally (or in your Cloud Shell workspace).
 
-Commentary: We start by acquiring the goods. Cloning keeps everyone on the same code baseline so screenshots, commands, and reality stay friends.
-
 ```bash
 git clone https://github.com/pelithne/appservice-to-containerapp.git
 cd appservice-to-containerapp
@@ -32,7 +30,7 @@ If you are using Azure Cloud Shell you can paste the above directly. The `ls` co
 - (Optional) jq for nicer JSON parsing
 
 ## Environment Variables
-These variables keep the rest of the commands pleasantly short. Adjust names if you’re running multiple parallel workshops. Pick a stable `ACR_NAME` if you want to reuse the registry later (or keep `$RANDOM` for ephemeral fun).
+These variables keep the rest of the commands pleasantly short. Pick a stable, but unique, `ACR_NAME` if you want to reuse the registry later (or keep `$RANDOM` for ephemeral fun).
 
 ```bash
 RESOURCE_GROUP="aca-workshop-rg"
@@ -47,14 +45,6 @@ FULL_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 Create the resource group (your blast radius boundary):
 ```bash
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
-```
-
-### (Optional but Recommended) Sanity Check Your Variables
-This quick loop aborts early if you fat‑fingered a name (silent empty vars cause the weirdest Azure errors later).
-```bash
-required=(RESOURCE_GROUP LOCATION ACR_NAME APP_NAME ENV_NAME IMAGE_NAME IMAGE_TAG)
-miss=0; for v in "${required[@]}"; do [ -z "${!v:-}" ] && echo "Missing $v" && miss=1; done; [ $miss -eq 0 ] || { echo "✖ One or more variables are unset"; return 1 2>/dev/null || exit 1; }
-echo "Variables look good ✅"
 ```
 
 ## 1. Create / Containerize a Simple Python FastAPI Web API
@@ -74,11 +64,7 @@ Provision your private container registry. We deliberately disable the legacy ad
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
-Optional (not required for build tasks):
-```bash
-az acr login -n "$ACR_NAME"
-```
-Commentary: This login is mostly ceremonial here; ACR Tasks authenticate automatically. Keep it if you want to list repos with local Docker later.
+
 ## 3. Build Image with ACR (Cloud Shell Friendly)
 Instead of using a local Docker engine we leverage ACR Tasks (`az acr build`). This uploads the build context and builds the image inside Azure. The build both builds AND pushes the image automatically.
 
@@ -88,25 +74,25 @@ az acr build \
   --image ${IMAGE_NAME}:${IMAGE_TAG} \
   ./app
 ```
-Commentary: Let Azure do the sweating. If the first build waits on an agent, that’s normal cold start. Subsequent builds are snappier thanks to layer caching.
+Commentary: If the first build waits on an agent, that’s normal cold start. Subsequent builds are snappier thanks to layer caching.
 
 Verify repository & tag:
 ```bash
 az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_NAME" -o table
 ```
 Purpose: Inventory check. If nothing shows, the build failed or you queried the wrong repo name.
-Run locally (optional) only if you have Docker; otherwise skip:
-```bash
-docker run -it --rm -p 8080:8080 ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
-```
-Taste test: Quick functional sniff before deploying. Skip happily in Cloud Shell.
+
 ## 4. ACA Environment
 ```bash
 az extension add --name containerapp --upgrade
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 Explanation: Ensures you have the freshest `containerapp` CLI then provisions the managed environment—a multi-tenant substrate you don’t manage directly (no cluster babysitting required).
+
+
 ## 5. Deploy App + Probes
+Deploy the Container App to the newly created environment. This command will create an app with an external ingress listening on port 443, that forwards traffic to your app on port 8080. Also the app will be created with specific cpu- and memory requirements and with a max number of allowed replicas set to 5.
+
 ```bash
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
