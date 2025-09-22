@@ -16,6 +16,15 @@ In this exercise you will deploy a minimal API that calls an Azure OpenAI GPT mo
 - Azure CLI ≥ 2.53 and `containerapp` extension.
 - Your account has permissions to assign roles: `Cognitive Services OpenAI User` role on the Azure OpenAI resource for the managed identity.
 
+### Clone the repo
+If you have not already, make sure to clone the repository:
+
+```bash
+git clone https://github.com/pelithne/appservice-to-containerapp.git
+cd appservice-to-containerapp
+ls -1 app
+```
+
 ### Create Azure OpenAI Resource
 Pick a region that supports the model family you want (portal lists availability). Example below uses `swedencentral` — adjust as needed.
 
