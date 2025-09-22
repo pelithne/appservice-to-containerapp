@@ -32,6 +32,7 @@ Pick a region that supports the model family you want (portal lists availability
 AOAI_RESOURCE_GROUP="openai-rg"
 AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
 AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
+UAMI_NAME="aca-openai-uami"
 
 az group create -n "$AOAI_RESOURCE_GROUP" -l "$AOAI_LOCATION"
 
@@ -93,7 +94,6 @@ APP_NAME="aca-openai-api"
 ACR_NAME="acaworkshop$RANDOM"            # If you need a new registry
 IMAGE_NAME="openaiapi"
 IMAGE_TAG="v1"
-UAMI_NAME="aca-openai-uami"
 AOAI_API_VERSION="2024-08-01-preview"     # Use a supported api-version
 ```
 
