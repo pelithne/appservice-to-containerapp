@@ -1,4 +1,4 @@
-# Exercise 1: From App Service Web API to Azure Container Apps (Python Version)
+# Exercise 1: From App Service Web API to Azure Container Apps
 
 This exercise walks you through containerizing a simple Python FastAPI web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
 
@@ -48,6 +48,8 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 1. Create / Containerize a Simple Python FastAPI Web API
+The application we are containerizing is veeeery simple. It's just a tiny bit of python code and it's requirements. In order to containerize we have added a simple Dockerfile.
+
 Project layout:
 ```
 app/
