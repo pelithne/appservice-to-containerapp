@@ -6,6 +6,18 @@ This exercise walks you through containerizing a simple Python FastAPI web API, 
 
 ---
 
+## Clone the Repository
+
+If you have not already cloned this workshop repository, do that first so you have the application source (`app/`), `Dockerfile`, and exercise guides locally (or in your Cloud Shell workspace).
+
+```bash
+git clone https://github.com/pelithne/appservice-to-containerapp.git
+cd appservice-to-containerapp
+ls -1 app
+```
+
+If you are using Azure Cloud Shell you can paste the above directly. The `ls` command should show `main.py`, `requirements.txt`, and `Dockerfile`.
+
 ## Prerequisites
 
 - Azure subscription with permission to create resource groups and container resources
