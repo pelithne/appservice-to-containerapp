@@ -173,7 +173,9 @@ If you go to the Azure portal and look under **Revisions and replicas** you will
 ![Revisions and replicas](./images/replicas1.png)
 
 
+If you navigate to your container app, and click on the **Application URL** you should find that the message has now changed:
 
+![Python app message](./images/message.png)
 
 ## 8. Logs
 ```bash
