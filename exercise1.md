@@ -168,14 +168,94 @@ After this you can update the container app to use the new version with this com
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
 ````
 
+
 If you go to the Azure portal and look under **Revisions and replicas** you will find that a new replica is either activating like in the image below or acivated.
 
 ![Revisions and replicas](./images/revisions1.png)
 
 
-If you navigate to your container app, and click on the **Application URL** you should find that the message has now changed:
+
+Navigate to your container app, and click on the **Application URL**. You should find that the message has now changed:
 
 ![Python app message](./images/message.png)
+
+
+
+Now, lets pretend that we introduce an error in our application, once again using the ````sed```` command.
+
+```bash
+sed -i 's|Hello from Container Apps (Python) v2!|Error Error Error Error!!!|' app/main.py
+
+```
+Then rebuild the container. This time we tag it as version 3 (v3).
+````bash
+az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v3 ./app
+````
+
+Now update the container with the new version. But this time we are worried that we might have introduced an error, so we only want to deploy the app in a **Canary** fashion, meaning that we only want the new replica to receive a small percentage of the traffic.
+
+First deploy the new revision (do NOT disable the previous one):
+````bash
+az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v3 --revision-suffix v3
+````
+
+List the revisions so we know their full names:
+````bash
+az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
+````
+You should see something like (names will differ):
+```
+Name                         Traffic Weight  Active  Running
+aca-webapi--v1               100%            true    Yes
+aca-webapi--v2               0%              true    No
+aca-webapi--v3               0%              true    Yes
+```
+We want 70% to stay on the stable revision (for example v2 if that is the current serving one) and 30% to go to our new v3 canary.
+
+Split traffic (replace the names with those returned above):
+````bash
+az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --revision-weight "${APP_NAME}--v2=70" "${APP_NAME}--v3=30"
+````
+
+Verify the distribution:
+````bash
+az containerapp ingress traffic show -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
+````
+
+Hit the application URL several times (or use a quick loop) to observe intermittent Error responses (the canary) among the stable ones. Adjust weights as confidence grows:
+````bash
+az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --revision-weight "${APP_NAME}--v2=50" "${APP_NAME}--v3=50"
+````
+
+Roll back instantly by sending 100% to the previous revision:
+````bash
+az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --revision-weight "${APP_NAME}--v2=100"az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --revisions-mode multiple
+````
+
+### (Aside) Revision naming & dynamic lookup
+Container Apps composes revision names as `<app-name>--<revision-suffix>` (double dash). If you omit `--revision-suffix`, an auto‑generated hash style suffix is used. Using explicit suffixes (v1, v2, v3) makes traffic commands readable.
+
+If you ever forget the exact names, list them:
+```bash
+az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
+```
+
+You can also script grabbing the current “stable” revision (highest weight) then applying a canary automatically:
+```bash
+STABLE=$(az containerapp ingress traffic show -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --query "[?weight==`70`].revisionName" -o tsv)
+NEW=$(az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --query "[?contains(name, 'v3')].name" -o tsv)
+echo "Stable=$STABLE New=$NEW"
+az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --revision-weight "$STABLE=70" "$NEW=30"
+```
+
+Adjust the 70 to whatever your current stable percentage is (or query for the max weight instead of a literal).
+
 
 ## 8. Logs
 ```bash
