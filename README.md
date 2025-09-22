@@ -11,7 +11,7 @@ This repository contains a progressive workshop showing how to:
 7. Perform a rolling update (new image version)
 8. View logs & basic observability
 
-All steps use only Azure CLI and Docker.
+All steps use only Azure CLI. Exercise 1 leverages Azure Container Registry (ACR) build tasks so participants can complete it fully inside Azure Cloud Shell (no local Docker daemon required).
 
 ## Exercises
 

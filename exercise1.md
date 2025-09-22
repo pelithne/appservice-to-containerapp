@@ -11,12 +11,12 @@ This hands-on tutorial walks you through containerizing a simple Web API, pushin
 ## Prerequisites
 
 - Azure subscription with permission to create resource groups and container resources
-- Azure CLI (>= 2.53) installed and logged in:
+- Azure CLI (>= 2.53) or Azure Cloud Shell (no local Docker required)
+- Logged in:
   ```bash
   az login
   az account show
   ```
-- Docker installed and running (for local image build)
 - (Optional) jq for nicer JSON parsing
 
 ## Environment Variables
@@ -94,22 +94,31 @@ CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
 DOCKER
 ```
 
-### Build & Test Locally
-```bash
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./app
-docker run -it --rm -p 8080:8080 ${IMAGE_NAME}:${IMAGE_TAG}
-curl -s http://localhost:8080 | jq
-curl -s http://localhost:8080/healthz
-```
-## 2. ACR
+## 2. Create ACR
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
+```
+Optional (not required for build tasks):
+```bash
 az acr login -n "$ACR_NAME"
 ```
-## 3. Push Image
+## 3. Build Image with ACR (Cloud Shell Friendly)
+Instead of using a local Docker engine we leverage ACR Tasks (`az acr build`). This uploads the build context and builds the image inside Azure. The build both builds AND pushes the image automatically.
+
 ```bash
-docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${FULL_IMAGE}
-docker push ${FULL_IMAGE}
+az acr build \
+  --registry "$ACR_NAME" \
+  --image ${IMAGE_NAME}:${IMAGE_TAG} \
+  ./app
+```
+
+Verify repository & tag:
+```bash
+az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_NAME" -o table
+```
+Run locally (optional) only if you have Docker; otherwise skip:
+```bash
+docker run -it --rm -p 8080:8080 ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
 ```
 ## 4. ACA Environment
 ```bash
@@ -142,12 +151,10 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --min-replicas 1 --max-replicas 10
 ```
 ## 7. New Version
-Update the message and redeploy:
+Update the message and rebuild using ACR Tasks:
 ```bash
 sed -i "s/Hello from Container Apps (Python)!/Hello from Container Apps (Python) v2!/" app/main.py
-docker build -t ${IMAGE_NAME}:v2 ./app
-docker tag ${IMAGE_NAME}:v2 ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2
-docker push ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2
+az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
 ```
 ## 8. Logs
