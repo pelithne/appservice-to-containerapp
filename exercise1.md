@@ -118,6 +118,11 @@ When this command finishes, you can go to the Azure portal and check your **Cont
 ![Image of Azure Portal](./images/web-api.png)
 
 
+<!--
+DEPRECATED PROBE INSTRUCTION (commented out):
+The following guidance attempted to add probes using --set with a nested path. The Container Apps CLI interprets --set keys as env var names, so this fails with an invalid env var error.
+Retained here for reference; replace with YAML-based update instructions.
+
 Add liveness and readiness probes so Azure Container Apps can monitor and react to container health:
 
 * Liveness probe: Restarts the container if `/healthz` stops answering (protects against deadlocks or a wedged event loop).
@@ -125,13 +130,13 @@ Add liveness and readiness probes so Azure Container Apps can monitor and react 
 
 Tip: You can adjust `initialDelaySeconds` if startup time grows—better than watching a flurry of false negatives.
 
-
 ```bash
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --set template.containers[0].probes='[
   {"type":"liveness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":5,"periodSeconds":10},
   {"type":"readiness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":2,"periodSeconds":5}
 ]'
 ```
+-->
 ## 6. Scaling
 ```bash
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
