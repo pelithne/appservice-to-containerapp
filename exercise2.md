@@ -17,8 +17,61 @@ In this exercise you will deploy a minimal API that calls an Azure OpenAI GPT mo
 - You have (or will create) an Azure OpenAI resource + model deployment (e.g. `gpt-4o-mini` or `gpt-4o`) in a supported region.
 - Your account has permissions to assign roles: `Cognitive Services OpenAI User` role on the Azure OpenAI resource for the managed identity.
 
+> If you do NOT yet have an Azure OpenAI resource or model deployment, follow the next two sections to provision them. If you already have both, skip to **Set Variables**.
+
+### (Optional) Create Azure OpenAI Resource
+Pick a region that supports the model family you want (portal lists availability). Example below uses `swedencentral` — adjust as needed.
+
+```bash
+AOAI_RESOURCE_GROUP="openai-rg"
+AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
+AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
+
+az group create -n "$AOAI_RESOURCE_GROUP" -l "$AOAI_LOCATION"
+
+az cognitiveservices account create \
+  -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
+  -l "$AOAI_LOCATION" --kind OpenAI --sku S0 \
+  --custom-domain "$AOAI_ACCOUNT_NAME" --yes
+
+az cognitiveservices account show -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
+  --query '{name:name,location:location,provisioning:properties.provisioningState}' -o table
+```
+
+### (Optional) Deploy a Model (Create a Deployment)
+List available base models (filtered to GPT-ish examples):
+```bash
+az cognitiveservices account list-models -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
+  --query "[?contains(modelId,'gpt')].{model:modelId,format:format,capabilities:capabilities}" -o table
+```
+
+Create a deployment (example: `gpt-4o-mini`):
+```bash
+AOAI_DEPLOYMENT="gpt4o-mini"
+BASE_MODEL="gpt-4o-mini"        # Must match a modelId from the list above
+MODEL_VERSION="2024-08-06"      # Use a valid version for the selected model
+
+az cognitiveservices account deployment create \
+  -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
+  --deployment-name "$AOAI_DEPLOYMENT" \
+  --model-name "$BASE_MODEL" \
+  --model-version "$MODEL_VERSION" \
+  --model-format OpenAI \
+  --sku-name Standard \
+  --capacity 1
+
+az cognitiveservices account deployment show \
+  -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
+  --deployment-name "$AOAI_DEPLOYMENT" \
+  --query '{deployment:name,model:properties.model.name,status:properties.provisioningState}' -o table
+```
+
+> Provisioning tips:
+> - If capacity is constrained, try a smaller model (mini) or a different region.
+> - You only need one deployment for this exercise.
+
 ## Set Variables
-Update placeholders beginning with `AOAI_` to match your Azure OpenAI resource & deployment.
+Update placeholders beginning with `AOAI_` to match either the resource & deployment you just created above or an existing one.
 ```bash
 RESOURCE_GROUP="aca-workshop-rg"          # Reuse or create
 LOCATION="westeurope"                    # Must support both ACA and your Azure OpenAI model
@@ -53,8 +106,8 @@ UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o ts
 UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
 ```
 
-## Assign Azure OpenAI Role
-Grant the managed identity the `Cognitive Services OpenAI User` role on the Azure OpenAI account.
+## Assign Azure OpenAI Role (RBAC for Managed Identity)
+Grant the managed identity the least-privilege role needed to invoke completions: `Cognitive Services OpenAI User`.
 ```bash
 OPENAI_ID=$(az resource show -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" --resource-type "Microsoft.CognitiveServices/accounts" --query id -o tsv)
 az role assignment create \
@@ -63,6 +116,7 @@ az role assignment create \
   --role "Cognitive Services OpenAI User" \
   --scope "$OPENAI_ID"
 ```
+> Role assignment propagation may take 30–120 seconds. If you get 403s immediately after deployment, wait and retry.
 
 ## Create Source Code
 ```bash
@@ -192,6 +246,8 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --set template.contai
 ]'
 ```
 
+> NOTE: Direct `--set template.containers[0].probes=...` can fail in some CLI versions for deep objects. If you hit validation errors, export to YAML (`az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" -o yaml > app.yaml`), add probes under `template.containers[].probes`, then `az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --yaml app.yaml`.
+
 ## Test the Endpoint
 ```bash
 APP_URL=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
@@ -202,6 +258,25 @@ curl -s -X POST https://${APP_URL}/api/complete \
   -d '{"prompt":"Provide a fun fact about container security."}' | jq
 ```
 If you see an authorization error ensure the role assignment has propagated (can take a minute). Retry after ~60s.
+
+## Troubleshooting
+| Symptom | Likely Cause | Fix |
+|---------|--------------|-----|
+| 403 Forbidden from OpenAI endpoint | Role assignment not propagated | Wait 1–3 minutes, retry |
+| 404 Deployment not found | Wrong `AOAI_DEPLOYMENT` or region mismatch | List deployments: `az cognitiveservices account deployment list -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table` |
+| 429 / Throttling | Capacity or rate limits | Lower concurrency, scale out replicas, reduce token usage |
+| Model not in list | Region lacks that model | Pick a supported model from `list-models` output |
+| `ManagedIdentityCredential` fails locally | Running outside Azure | Use `az login` or set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` for a service principal (dev only) |
+
+Quick check of effective revision & image:
+```bash
+az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" --query '[].{rev:name,img:properties.template.containers[0].image}' -o table
+```
+
+Log only errors (grep style):
+```bash
+az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --tail 200 | grep -i "problem\|fail\|error" || true
+```
 
 ## Observing Logs
 ```bash

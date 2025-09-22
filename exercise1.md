@@ -1,4 +1,4 @@
-# Exercise 1: From App Service Web API to Azure Container Apps
+# Exercise 1: From Web API to Azure Container Apps
 
 This exercise walks you through containerizing a simple Python FastAPI web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
 
@@ -27,7 +27,7 @@ If you are using Azure Cloud Shell you can paste the above directly. The `ls` co
   az login
   az account show
   ```
-- (Optional) jq for nicer JSON parsing
+
 
 ## Environment Variables
 These variables keep the rest of the commands pleasantly short. Pick a stable, but unique, `ACR_NAME` if you want to reuse the registry later (or keep `$RANDOM` for ephemeral fun).
@@ -184,7 +184,7 @@ Navigate to your container app, and click on the **Application URL**. You should
 Now, lets pretend that we introduce an error in our application, once again using the ````sed```` command.
 
 ```bash
-sed -i 's|Hello from Container Apps (Python) v2!|Error Error Error Error!!!|' app/main.py
+sed -i 's|Hello from Container Apps (Python) v2!|Error Error Error!!!|' app/main.py
 
 ```
 Then rebuild the container. This time we tag it as version 3 (v3).
@@ -194,7 +194,22 @@ az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v3 ./app
 
 Now update the container with the new version. But this time we are worried that we might have introduced an error, so we only want to deploy the app in a **Canary** fashion, meaning that we only want the new replica to receive a small percentage of the traffic.
 
-First deploy the new revision (do NOT disable the previous one):
+In order for the container app to be able to run multiple revisions simultaneously, we need to activate that:
+
+````bash
+az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --revisions-mode multiple
+````
+
+Once that finishes, we want to make sure that the current revision will continue to carry 100% of the traffic after update. If we don't do this, the new revision will get 100% of the traffic.
+````bash
+az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --revision-weight "${APP_NAME}--v2=100"
+````
+
+
+
+
+Now deploy the new revision (do NOT disable the previous one):
 ````bash
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v3 --revision-suffix v3
 ````
@@ -203,14 +218,19 @@ List the revisions so we know their full names:
 ````bash
 az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
 ````
-You should see something like (names will differ):
+
+You should see something like:
 ```
-Name                         Traffic Weight  Active  Running
-aca-webapi--v1               100%            true    Yes
-aca-webapi--v2               0%              true    No
-aca-webapi--v3               0%              true    Yes
+CreatedTime                Active    Replicas    TrafficWeight    HealthState    ProvisioningState    Name
+-------------------------  --------  ----------  ---------------  -------------  -------------------  -------------------
+2025-09-22T13:19:49+00:00  True      1           100              Healthy        Provisioned          aca-webapi--v2
+2025-09-22T13:39:23+00:00  True      1           0                None           Provisioned          aca-webapi--v3
 ```
-We want 70% to stay on the stable revision (for example v2 if that is the current serving one) and 30% to go to our new v3 canary.
+
+Note: If you want to, you can check this out in the portal as well, under **revisions and replicas**.
+
+
+For our canary deployment, We want 70% to stay on the stable revision (for example v2 if that is the current serving one) and 30% to go to our new v3 canary.
 
 Split traffic (replace the names with those returned above):
 ````bash
@@ -223,16 +243,12 @@ Verify the distribution:
 az containerapp ingress traffic show -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
 ````
 
-Hit the application URL several times (or use a quick loop) to observe intermittent Error responses (the canary) among the stable ones. Adjust weights as confidence grows:
-````bash
-az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --revision-weight "${APP_NAME}--v2=50" "${APP_NAME}--v3=50"
-````
+Hit the application URL several times (or use a quick loop) to observe intermittent Error responses (the canary) among the stable ones. 
 
-Roll back instantly by sending 100% to the previous revision:
+Once we realize that we have deployed a bad app, we can roll back instantly by sending 100% to the previous revision:
 ````bash
 az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --revision-weight "${APP_NAME}--v2=100"az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --revisions-mode multiple
+  --revision-weight "${APP_NAME}--v2=100"
 ````
 
 ### (Aside) Revision naming & dynamic lookup
@@ -258,6 +274,8 @@ Adjust the 70 to whatever your current stable percentage is (or query for the ma
 
 
 ## 8. Logs
+For basic container logging, you can run this command
+
 ```bash
 az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --follow
 ```
