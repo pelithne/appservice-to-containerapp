@@ -99,6 +99,14 @@ az containerapp create \
   --cpu 0.25 --memory 0.5Gi \
   --revision-suffix v1
 ```
+
+When this command finishes, you can go to the Azure portal and check your *Container App*. It should look similar to the image below, and there should be an *Application Url* that you can click on to confirm that your app is up and running.
+
+![Image of Azure Portal](./images/web-api.png)
+
+
+
+
 ```bash
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --set template.containers[0].probes='[
   {"type":"liveness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":5,"periodSeconds":10},
