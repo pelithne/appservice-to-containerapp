@@ -149,13 +149,30 @@ Commentary: This adds an HTTP concurrency scale rule; think “open tables in a 
 
 
 ## 7. New Version
-Update the message and rebuild using ACR Tasks:
+Update the **message** of the python app using the ````sed```` command. Sed can be use to replace a string with another string.
+
 ```bash
-sed -i "s/Hello from Container Apps (Python)!/Hello from Container Apps (Python) v2!/" app/main.py
-az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
-az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
+sed -i 's|Hello from Container Apps (Python)!|Hello from Container Apps (Python) v2!|' app/main.py
+
 ```
-Explanation: `sed` mutates the source; new build bakes v2; update points the app at the new tag with a revision suffix so you can later split traffic if desired.
+
+Then rebuild using ACR Tasks (note: avoid unescaped ! in double quotes which can trigger history expansion in bash/zsh):
+````bash
+az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
+
+````
+
+After this you can update the container app to use the new version with this command. Note that we are now using **:v2** instead of **:v1**: 
+
+````bash
+az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
+````
+
+If you go to the Azure portal and look under **Revisions and replicas** you will find that a new replica is either activating like in the image below or acivated.
+
+![Revisions and replicas](./images/replicas1.png)
+
+
 
 
 ## 8. Logs
