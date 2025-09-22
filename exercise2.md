@@ -312,17 +312,21 @@ az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --environment "$ENV_NAME" \
-  --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG} \
+  --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}" \
   --ingress external --target-port 8080 \
-  --registry-server ${ACR_NAME}.azurecr.io \
-  --registry-identity $UAMI_ID \  # identity to authenticate to ACR
-  --user-assigned $UAMI_ID \       # identity available to your app code
+  --registry-server "${ACR_NAME}.azurecr.io" \
+  --registry-identity "$UAMI_ID" \
+  --user-assigned "$UAMI_ID" \
   --cpu 0.5 --memory 1Gi \
   --min-replicas 1 --max-replicas 3 \
-  --env-vars AOAI_ENDPOINT="https://${AOAI_ACCOUNT_NAME}.openai.azure.com/" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" AOAI_API_VERSION="$AOAI_API_VERSION" AZURE_CLIENT_ID="$UAMI_CLIENT_ID" \
+  --env-vars \
+    AOAI_ENDPOINT="https://${AOAI_ACCOUNT_NAME}.openai.azure.com/" \
+    AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" \
+    AOAI_API_VERSION="$AOAI_API_VERSION" \
+    AZURE_CLIENT_ID="$UAMI_CLIENT_ID" \
   --revision-suffix v1
 
-> Note: `--registry-identity` is distinct from `--user-assigned`. The first is used by the platform to pull the image; the second is injected for your code to request Cognitive Services tokens.
+
 ```
 
 
