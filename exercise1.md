@@ -10,6 +10,8 @@ This exercise walks you through containerizing a simple Python FastAPI web API, 
 
 If you have not already cloned this workshop repository, do that first so you have the application source (`app/`), `Dockerfile`, and exercise guides locally (or in your Cloud Shell workspace).
 
+Commentary: We start by acquiring the goods. Cloning keeps everyone on the same code baseline so screenshots, commands, and reality stay friends.
+
 ```bash
 git clone https://github.com/pelithne/appservice-to-containerapp.git
 cd appservice-to-containerapp
@@ -30,6 +32,8 @@ If you are using Azure Cloud Shell you can paste the above directly. The `ls` co
 - (Optional) jq for nicer JSON parsing
 
 ## Environment Variables
+These variables keep the rest of the commands pleasantly short. Adjust names if you’re running multiple parallel workshops. Pick a stable `ACR_NAME` if you want to reuse the registry later (or keep `$RANDOM` for ephemeral fun).
+
 ```bash
 RESOURCE_GROUP="aca-workshop-rg"
 LOCATION="swedencentral"
@@ -40,8 +44,17 @@ IMAGE_NAME="webapi"
 IMAGE_TAG="v1"
 FULL_IMAGE="${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}"
 ```
+Create the resource group (your blast radius boundary):
 ```bash
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
+```
+
+### (Optional but Recommended) Sanity Check Your Variables
+This quick loop aborts early if you fat‑fingered a name (silent empty vars cause the weirdest Azure errors later).
+```bash
+required=(RESOURCE_GROUP LOCATION ACR_NAME APP_NAME ENV_NAME IMAGE_NAME IMAGE_TAG)
+miss=0; for v in "${required[@]}"; do [ -z "${!v:-}" ] && echo "Missing $v" && miss=1; done; [ $miss -eq 0 ] || { echo "✖ One or more variables are unset"; return 1 2>/dev/null || exit 1; }
+echo "Variables look good ✅"
 ```
 
 ## 1. Create / Containerize a Simple Python FastAPI Web API
@@ -57,6 +70,7 @@ Feel free to have a look at the code and the Dockerfile, to get an understanding
 
 
 ## 2. Create ACR
+Provision your private container registry. We deliberately disable the legacy admin user for better security hygiene (use Azure AD auth + managed identities instead).
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
@@ -64,6 +78,7 @@ Optional (not required for build tasks):
 ```bash
 az acr login -n "$ACR_NAME"
 ```
+Commentary: This login is mostly ceremonial here; ACR Tasks authenticate automatically. Keep it if you want to list repos with local Docker later.
 ## 3. Build Image with ACR (Cloud Shell Friendly)
 Instead of using a local Docker engine we leverage ACR Tasks (`az acr build`). This uploads the build context and builds the image inside Azure. The build both builds AND pushes the image automatically.
 
@@ -73,20 +88,24 @@ az acr build \
   --image ${IMAGE_NAME}:${IMAGE_TAG} \
   ./app
 ```
+Commentary: Let Azure do the sweating. If the first build waits on an agent, that’s normal cold start. Subsequent builds are snappier thanks to layer caching.
 
 Verify repository & tag:
 ```bash
 az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_NAME" -o table
 ```
+Purpose: Inventory check. If nothing shows, the build failed or you queried the wrong repo name.
 Run locally (optional) only if you have Docker; otherwise skip:
 ```bash
 docker run -it --rm -p 8080:8080 ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
 ```
+Taste test: Quick functional sniff before deploying. Skip happily in Cloud Shell.
 ## 4. ACA Environment
 ```bash
 az extension add --name containerapp --upgrade
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
+Explanation: Ensures you have the freshest `containerapp` CLI then provisions the managed environment—a multi-tenant substrate you don’t manage directly (no cluster babysitting required).
 ## 5. Deploy App + Probes
 ```bash
 az containerapp create \
@@ -100,11 +119,17 @@ az containerapp create \
   --revision-suffix v1
 ```
 
-When this command finishes, you can go to the Azure portal and check your *Container App*. It should look similar to the image below, and there should be an *Application Url* that you can click on to confirm that your app is up and running.
+When this command finishes, you can go to the Azure portal and check your **Container App**. It should look similar to the image below, and there should be an *Application Url* that you can click on to confirm that your app is up and running.
 
 ![Image of Azure Portal](./images/web-api.png)
 
 
+Add liveness and readiness probes so Azure Container Apps can monitor and react to container health:
+
+* Liveness probe: Restarts the container if `/healthz` stops answering (protects against deadlocks or a wedged event loop).
+* Readiness probe: Keeps traffic away until the app is truly ready; later failures pause traffic without killing the process.
+
+Tip: You can adjust `initialDelaySeconds` if startup time grows—better than watching a flurry of false negatives.
 
 
 ```bash
@@ -120,6 +145,7 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --scale-rule-metadata concurrentRequests=50 \
   --min-replicas 1 --max-replicas 10
 ```
+Commentary: This adds an HTTP concurrency scale rule; think “open tables in a café.” Go higher if each request is I/O bound, lower if CPU heavy. Min keeps a warm instance; max caps runaway scaling.
 ## 7. New Version
 Update the message and rebuild using ACR Tasks:
 ```bash
@@ -127,12 +153,15 @@ sed -i "s/Hello from Container Apps (Python)!/Hello from Container Apps (Python)
 az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
 ```
+Explanation: `sed` mutates the source; new build bakes v2; update points the app at the new tag with a revision suffix so you can later split traffic if desired.
 ## 8. Logs
 ```bash
 az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --follow
 ```
+Tip: Add `--tail 100` or pipe through `grep` for targeted hunts. For structured querying, consider attaching Log Analytics (next exercises / future enhancement).
 ## 9. Cleanup
 ```bash
 az group delete -n "$RESOURCE_GROUP" --yes --no-wait
 ```
+Retires everything in one swing. Omit `--no-wait` if you want synchronous confirmation. Double‑check the RG name—undo is… not a thing.
 <!-- END ORIGINAL CONTENT -->
