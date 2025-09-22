@@ -88,15 +88,16 @@ Purpose: Inventory check. If nothing shows, the build failed or you queried the 
 Make sure you have the freshest `containerapp` CLI with the ````az extension add```` command below. 
 
 
-```bash
+````bash
 az extension add --name containerapp --upgrade
+
 ````
 
 After the command completes, create a managed environment. If it fails, it could be that the extension is not completely installed yet. If so, just try again.
 
-````
+````bash
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
-```
+````
 
 ## 5. Deploy App + Probes
 Deploy the Container App to the newly created environment. This command will create an app with an external ingress listening on port 443, that forwards traffic to your app on port 8080. Also the app will be created with specific cpu- and memory requirements and with a max number of allowed replicas set to 5.
@@ -145,6 +146,8 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --min-replicas 1 --max-replicas 10
 ```
 Commentary: This adds an HTTP concurrency scale rule; think “open tables in a café.” Go higher if each request is I/O bound, lower if CPU heavy. Min keeps a warm instance; max caps runaway scaling.
+
+
 ## 7. New Version
 Update the message and rebuild using ACR Tasks:
 ```bash
@@ -153,11 +156,15 @@ az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v2 --revision-suffix v2
 ```
 Explanation: `sed` mutates the source; new build bakes v2; update points the app at the new tag with a revision suffix so you can later split traffic if desired.
+
+
 ## 8. Logs
 ```bash
 az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --follow
 ```
 Tip: Add `--tail 100` or pipe through `grep` for targeted hunts. For structured querying, consider attaching Log Analytics (next exercises / future enhancement).
+
+
 ## 9. Cleanup
 ```bash
 az group delete -n "$RESOURCE_GROUP" --yes --no-wait
