@@ -14,16 +14,13 @@ In this exercise you will deploy a minimal API that calls an Azure OpenAI GPT mo
 ## Prerequisites
 - Completion of Exercise 1 (you may reuse the resource group & env) OR create new.
 - Azure CLI ≥ 2.53 and `containerapp` extension.
-- You have (or will create) an Azure OpenAI resource + model deployment (e.g. `gpt-4o-mini` or `gpt-4o`) in a supported region.
 - Your account has permissions to assign roles: `Cognitive Services OpenAI User` role on the Azure OpenAI resource for the managed identity.
 
-> If you do NOT yet have an Azure OpenAI resource or model deployment, follow the next two sections to provision them. If you already have both, skip to **Set Variables**.
-
-### (Optional) Create Azure OpenAI Resource
+### Create Azure OpenAI Resource
 Pick a region that supports the model family you want (portal lists availability). Example below uses `swedencentral` — adjust as needed.
 
 ```bash
-AOAI_RESOURCE_GROUP="openai-rg"
+AOAI_RESOURCE_GROUP="openai-rg-2"
 AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
 AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
 
@@ -38,18 +35,24 @@ az cognitiveservices account show -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GRO
   --query '{name:name,location:location,provisioning:properties.provisioningState}' -o table
 ```
 
-### (Optional) Deploy a Model (Create a Deployment)
-List available base models (filtered to GPT-ish examples):
+### Deploy a Model (Create a Deployment)
+First discover models and versions actually available to YOUR subscription in THIS region (they vary):
 ```bash
-az cognitiveservices account list-models -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
-  --query "[?contains(modelId,'gpt')].{model:modelId,format:format,capabilities:capabilities}" -o table
+# Raw list (can be long)
+az cognitiveservices account list-models -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table
+
+
 ```
 
-Create a deployment (example: `gpt-4o-mini`):
+Select deployment name & capacity. Azure OpenAI currently distinguishes between legacy `Standard` and pooled `GlobalStandard` SKUs. Some newer GPT-4o variants ONLY support `GlobalStandard`. If a deployment fails with `DeploymentModelNotSupported` try switching the SKU or a different version.
+
+Create the deployment:
 ```bash
-AOAI_DEPLOYMENT="gpt4o-mini"
-BASE_MODEL="gpt-4o-mini"        # Must match a modelId from the list above
-MODEL_VERSION="2024-08-06"      # Use a valid version for the selected model
+AOAI_DEPLOYMENT="gpt4o-mini"             # Your deployment handle (free-form, lowercase recommended)
+BASE_MODEL=${BASE_MODEL:-gpt-4o-mini}     # Ensure set from above
+MODEL_VERSION=${MODEL_VERSION:-2024-07-18} # Fallback if auto-pick not used
+DEPLOY_SKU="GlobalStandard"              # Try GlobalStandard first for GPT-4o family
+CAPACITY=30                               # GlobalStandard often needs higher min capacity; reduce if allowed
 
 az cognitiveservices account deployment create \
   -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
@@ -57,23 +60,24 @@ az cognitiveservices account deployment create \
   --model-name "$BASE_MODEL" \
   --model-version "$MODEL_VERSION" \
   --model-format OpenAI \
-  --sku-name Standard \
-  --capacity 1
+  --sku-name $DEPLOY_SKU \
+  --capacity $CAPACITY
+
+# If you get DeploymentModelNotSupported, retry with:
+#   1) A version explicitly listed in the versions output above
+#   2) A different SKU (Standard vs GlobalStandard)
+#   3) A different region that lists the desired version
 
 az cognitiveservices account deployment show \
   -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
   --deployment-name "$AOAI_DEPLOYMENT" \
-  --query '{deployment:name,model:properties.model.name,status:properties.provisioningState}' -o table
+  --query '{deployment:name,model:properties.model.name,version:properties.model.version,sku:sku.name,status:properties.provisioningState}' -o table
 ```
 
-> Provisioning tips:
-> - If capacity is constrained, try a smaller model (mini) or a different region.
-> - You only need one deployment for this exercise.
-
 ## Set Variables
-Update placeholders beginning with `AOAI_` to match either the resource & deployment you just created above or an existing one.
+
 ```bash
-RESOURCE_GROUP="aca-workshop-rg"          # Reuse or create
+RESOURCE_GROUP="aca-workshop-2-rg"          # Reuse or create
 LOCATION="westeurope"                    # Must support both ACA and your Azure OpenAI model
 ENV_NAME="aca-env"                        # Reuse from exercise 1 if desired
 APP_NAME="aca-openai-api"
@@ -81,22 +85,18 @@ ACR_NAME="acaworkshop$RANDOM"            # If you need a new registry
 IMAGE_NAME="openaiapi"
 IMAGE_TAG="v1"
 UAMI_NAME="aca-openai-uami"
-AOAI_RESOURCE_GROUP="<openai-rg>"         # Resource group containing your Azure OpenAI
-AOAI_ACCOUNT_NAME="<openai-account-name>" # Name of Azure OpenAI resource
-AOAI_DEPLOYMENT="<model-deployment-name>" # Model deployment (e.g. gpt-4o-mini)
 AOAI_API_VERSION="2024-08-01-preview"     # Use a supported api-version
 ```
 
-Create (or ensure) resource group:
+Create (or ensure) resource group for container app:
 ```bash
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## (Optional) Create ACR & Login
-Skip if you already have one from Exercise 1.
+## Create ACR
+
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
-az acr login -n "$ACR_NAME"
 ```
 
 ## Create User Assigned Managed Identity
@@ -141,35 +141,70 @@ TokenCredential credential = new DefaultAzureCredential();
 HttpClient http = new();
 
 app.MapPost("/api/complete", async (PromptRequest req) => {
-    if (string.IsNullOrWhiteSpace(req.Prompt)) return Results.BadRequest("Prompt required");
+  if (string.IsNullOrWhiteSpace(req.Prompt)) return Results.BadRequest("Prompt required");
 
-    // Acquire token for Azure OpenAI (Cognitive Services scope)
-    var token = await credential.GetTokenAsync(new TokenRequestContext(new[] { "https://cognitiveservices.azure.com/.default" }));
-    http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
+  // Acquire token for Azure OpenAI (Cognitive Services scope)
+  var token = await credential.GetTokenAsync(
+    new TokenRequestContext(new[] { "https://cognitiveservices.azure.com/.default" }),
+    CancellationToken.None);
+  http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
-    var payload = new {
-        input = req.Prompt,
-        temperature = 0.2,
-        max_output_tokens = 256
+  // Try Responses endpoint first
+  var responsesPayload = new {
+    input = req.Prompt,
+    temperature = 0.2,
+    max_output_tokens = 256
+  };
+  var responsesUrl = $"{openAiEndpoint}openai/deployments/{deployment}/responses?api-version={apiVersion}";
+  using var responsesResp = await http.PostAsync(responsesUrl, new StringContent(JsonSerializer.Serialize(responsesPayload), Encoding.UTF8, "application/json"));
+
+  if (responsesResp.StatusCode == System.Net.HttpStatusCode.NotFound)
+  {
+    // Fallback: Chat Completions
+    var chatPayload = new {
+      messages = new object[] { new { role = "user", content = req.Prompt } },
+      temperature = 0.2,
+      max_tokens = 256
     };
+    var chatUrl = $"{openAiEndpoint}openai/deployments/{deployment}/chat/completions?api-version={apiVersion}";
+    using var chatResp = await http.PostAsync(chatUrl, new StringContent(JsonSerializer.Serialize(chatPayload), Encoding.UTF8, "application/json"));
+    var chatBody = await chatResp.Content.ReadAsStringAsync();
+    if (!chatResp.IsSuccessStatusCode)
+      return Results.Problem(title: "OpenAI chat call failed", detail: chatBody, statusCode: (int)chatResp.StatusCode);
 
-    var url = $"{openAiEndpoint}openai/deployments/{deployment}/responses?api-version={apiVersion}";
-    var json = new StringContent(JsonSerializer.Serialize(payload), Encoding.UTF8, "application/json");
+    using var chatDoc = JsonDocument.Parse(chatBody);
+    var chatText = chatDoc.RootElement.GetProperty("choices")[0].GetProperty("message").GetProperty("content").GetString();
+    return Results.Ok(new { completion = chatText, endpoint = "chat" });
+  }
 
-    using var resp = await http.PostAsync(url, json);
-    if (!resp.IsSuccessStatusCode)
+  var respBody = await responsesResp.Content.ReadAsStringAsync();
+  if (!responsesResp.IsSuccessStatusCode)
+    return Results.Problem(title: "OpenAI responses call failed", detail: respBody, statusCode: (int)responsesResp.StatusCode);
+
+  using var doc = JsonDocument.Parse(respBody);
+  string? extracted = null;
+  try
+  {
+    var output = doc.RootElement.GetProperty("output");
+    if (output.ValueKind == JsonValueKind.Array && output.GetArrayLength() > 0)
     {
-        var err = await resp.Content.ReadAsStringAsync();
-        return Results.Problem(title: "OpenAI call failed", detail: err, statusCode: (int)resp.StatusCode);
+      var first = output[0];
+      if (first.TryGetProperty("content", out var contentElem) && contentElem.ValueKind == JsonValueKind.Array && contentElem.GetArrayLength() > 0)
+      {
+        var c0 = contentElem[0];
+        if (c0.TryGetProperty("text", out var textElem)) extracted = textElem.GetString();
+        else extracted = c0.ToString();
+      }
+      else
+      {
+        extracted = first.ToString();
+      }
     }
+  }
+  catch { }
+  extracted ??= doc.RootElement.ToString();
 
-    using var doc = JsonDocument.Parse(await resp.Content.ReadAsStringAsync());
-    // Basic extraction of the first text output (schema may evolve)
-    var text = doc.RootElement
-        .GetProperty("output")
-        .GetProperty("[0]"); // fallback simplified – adapt to latest schema if needed
-
-    return Results.Ok(new { completion = text.ToString() });
+  return Results.Ok(new { completion = extracted, endpoint = "responses" });
 });
 
 app.MapGet("/healthz", () => Results.Ok("OK"));
@@ -209,17 +244,20 @@ dotnet restore
 cd ..
 ```
 
-## Build & Push Image
+## Build & Push Image (Remote ACR Build – Cloud Shell Friendly)
+Use Azure Container Registry's remote build so you don't need a local Docker daemon (ideal for Azure Cloud Shell):
 ```bash
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./openai-api
-docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
-docker push ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
+# Queue a remote build from the local folder (context path) and tag the image
+az acr build -r ${ACR_NAME} -t ${IMAGE_NAME}:${IMAGE_TAG} ./openai-api
+
+# List images to verify
+az acr repository show-tags -n ${ACR_NAME} --repository ${IMAGE_NAME} -o table
 ```
 
-## Ensure ACA Environment Exists
+
+
+## Crate ACA Environment 
 ```bash
-az extension add --name containerapp --upgrade
-az containerapp env show -n "$ENV_NAME" -g "$RESOURCE_GROUP" >/dev/null 2>&1 || \
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
@@ -238,19 +276,14 @@ az containerapp create \
   --revision-suffix v1
 ```
 
-## Add Health Probes
-```bash
-az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --set template.containers[0].probes='[
- {"type":"liveness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":5,"periodSeconds":15},
- {"type":"readiness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":2,"periodSeconds":5}
-]'
-```
 
-> NOTE: Direct `--set template.containers[0].probes=...` can fail in some CLI versions for deep objects. If you hit validation errors, export to YAML (`az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" -o yaml > app.yaml`), add probes under `template.containers[].probes`, then `az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --yaml app.yaml`.
+
+
 
 ## Test the Endpoint
 ```bash
 APP_URL=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
+
 curl -s https://${APP_URL}/healthz
 
 curl -s -X POST https://${APP_URL}/api/complete \
@@ -264,9 +297,32 @@ If you see an authorization error ensure the role assignment has propagated (can
 |---------|--------------|-----|
 | 403 Forbidden from OpenAI endpoint | Role assignment not propagated | Wait 1–3 minutes, retry |
 | 404 Deployment not found | Wrong `AOAI_DEPLOYMENT` or region mismatch | List deployments: `az cognitiveservices account deployment list -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table` |
+| 404 on /api/complete (health OK) | Responses endpoint unsupported in region/api-version; fallback not triggered yet or deployment typo | Use fallback code (added), verify deployment name, try direct chat curl |
 | 429 / Throttling | Capacity or rate limits | Lower concurrency, scale out replicas, reduce token usage |
 | Model not in list | Region lacks that model | Pick a supported model from `list-models` output |
 | `ManagedIdentityCredential` fails locally | Running outside Azure | Use `az login` or set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` for a service principal (dev only) |
+
+### Manual Endpoint Diagnostics
+Confirm deployment exists:
+```bash
+az cognitiveservices account deployment list -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table
+```
+Get token & test responses endpoint directly:
+```bash
+TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv)
+curl -i -H "Authorization: Bearer $TOKEN" \
+  "https://${AOAI_ACCOUNT_NAME}.openai.azure.com/openai/deployments/${AOAI_DEPLOYMENT}/responses?api-version=${AOAI_API_VERSION}" \
+  -H 'Content-Type: application/json' \
+  -d '{"input":"ping"}'
+```
+If 404 here but deployment lists correctly, test chat:
+```bash
+curl -i -H "Authorization: Bearer $TOKEN" \
+  "https://${AOAI_ACCOUNT_NAME}.openai.azure.com/openai/deployments/${AOAI_DEPLOYMENT}/chat/completions?api-version=${AOAI_API_VERSION}" \
+  -H 'Content-Type: application/json' \
+  -d '{"messages":[{"role":"user","content":"ping"}],"max_tokens":8}'
+```
+If chat works and responses 404s, rely on fallback logic or switch permanently to chat.
 
 Quick check of effective revision & image:
 ```bash
