@@ -6,8 +6,6 @@ This exercise walks you through containerizing a simple Python FastAPI web API, 
 
 ---
 
-This hands-on tutorial walks you through containerizing a simple Web API, pushing the image to Azure Container Registry (ACR), and deploying it to Azure Container Apps (ACA) with ingress, scaling, and health probes — all using Azure CLI.
-
 ## Prerequisites
 
 - Azure subscription with permission to create resource groups and container resources
@@ -35,7 +33,7 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 1. Create / Containerize a Simple Python FastAPI Web API
-Project layout (created for you in this repo now):
+Project layout:
 ```
 app/
   ├── main.py
