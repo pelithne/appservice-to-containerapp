@@ -99,6 +99,27 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
 
+### Grant the Managed Identity ACR Pull Permission
+Unlike AKS (where `az aks update -n CLUSTER -g RG --attach-acr ACR_NAME` wires up the cluster's kubelet identity automatically), Azure Container Apps requires you to explicitly assign the `AcrPull` role to the user‑assigned managed identity when you rely on that identity for image pulls.
+
+1. Capture IDs and assign `AcrPull`:
+```bash
+ACR_ID=$(az acr show -n "$ACR_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
+UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
+
+az role assignment create \
+  --assignee-object-id $UAMI_PRINCIPAL_ID \
+  --assignee-principal-type ServicePrincipal \
+  --role AcrPull \
+  --scope $ACR_ID
+```
+2. (Optional) Verify:
+```bash
+az role assignment list --assignee $UAMI_PRINCIPAL_ID --scope $ACR_ID -o table
+```
+
+> Why this step? Container Apps only auto-resolves registry credentials if: (a) admin credentials are enabled (we disabled them for security), or (b) you specify a managed identity with the proper role via `--registry-identity`. The role assignment makes the identity authorized; specifying it during create tells the platform which identity to use.
+
 ## Create User Assigned Managed Identity
 ```bash
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
@@ -136,17 +157,33 @@ string openAiEndpoint = Environment.GetEnvironmentVariable("AOAI_ENDPOINT") ?? t
 string deployment = Environment.GetEnvironmentVariable("AOAI_DEPLOYMENT") ?? throw new("AOAI_DEPLOYMENT missing");
 string apiVersion = Environment.GetEnvironmentVariable("AOAI_API_VERSION") ?? "2024-08-01-preview";
 
-// DefaultAzureCredential will leverage the managed identity inside Container Apps
-TokenCredential credential = new DefaultAzureCredential();
+// Prefer explicit user-assigned identity if AZURE_CLIENT_ID is set to avoid ambiguity
+var azureClientId = Environment.GetEnvironmentVariable("AZURE_CLIENT_ID");
+TokenCredential credential = string.IsNullOrWhiteSpace(azureClientId)
+  ? new DefaultAzureCredential()
+  : new ManagedIdentityCredential(azureClientId);
+Console.WriteLine($"[Startup] Using credential type: {(string.IsNullOrWhiteSpace(azureClientId) ? "DefaultAzureCredential" : "ManagedIdentityCredential with clientId")}");
 HttpClient http = new();
 
 app.MapPost("/api/complete", async (PromptRequest req) => {
   if (string.IsNullOrWhiteSpace(req.Prompt)) return Results.BadRequest("Prompt required");
 
   // Acquire token for Azure OpenAI (Cognitive Services scope)
-  var token = await credential.GetTokenAsync(
-    new TokenRequestContext(new[] { "https://cognitiveservices.azure.com/.default" }),
-    CancellationToken.None);
+  AccessToken token;
+  try
+  {
+    token = await credential.GetTokenAsync(
+      new TokenRequestContext(new[] { "https://cognitiveservices.azure.com/.default" }),
+      CancellationToken.None);
+  }
+  catch (Azure.Identity.AuthenticationFailedException authEx)
+  {
+    return Results.Problem(
+      title: "Managed identity token acquisition failed",
+      detail: authEx.Message + (authEx.InnerException != null ? " | Inner: " + authEx.InnerException.Message : string.Empty) +
+              (string.IsNullOrWhiteSpace(azureClientId) ? " | Hint: Set AZURE_CLIENT_ID to the user-assigned identity clientId." : string.Empty),
+      statusCode: 500);
+  }
   http.DefaultRequestHeaders.Authorization = new AuthenticationHeaderValue("Bearer", token.Token);
 
   // Try Responses endpoint first
@@ -261,7 +298,7 @@ az acr repository show-tags -n ${ACR_NAME} --repository ${IMAGE_NAME} -o table
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## Deploy Container App (Attach Managed Identity)
+## Deploy Container App (Attach Managed Identity & Use It for ACR)
 ```bash
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
@@ -269,11 +306,14 @@ az containerapp create \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG} \
   --ingress external --target-port 8080 \
   --registry-server ${ACR_NAME}.azurecr.io \
-  --user-assigned $UAMI_ID \
+  --registry-identity $UAMI_ID \  # identity to authenticate to ACR
+  --user-assigned $UAMI_ID \       # identity available to your app code
   --cpu 0.5 --memory 1Gi \
   --min-replicas 1 --max-replicas 3 \
-  --env-vars AOAI_ENDPOINT="https://${AOAI_ACCOUNT_NAME}.openai.azure.com/" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" AOAI_API_VERSION="$AOAI_API_VERSION" \
+  --env-vars AOAI_ENDPOINT="https://${AOAI_ACCOUNT_NAME}.openai.azure.com/" AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" AOAI_API_VERSION="$AOAI_API_VERSION" AZURE_CLIENT_ID="$UAMI_CLIENT_ID" \
   --revision-suffix v1
+
+> Note: `--registry-identity` is distinct from `--user-assigned`. The first is used by the platform to pull the image; the second is injected for your code to request Cognitive Services tokens.
 ```
 
 
@@ -301,6 +341,50 @@ If you see an authorization error ensure the role assignment has propagated (can
 | 429 / Throttling | Capacity or rate limits | Lower concurrency, scale out replicas, reduce token usage |
 | Model not in list | Region lacks that model | Pick a supported model from `list-models` output |
 | `ManagedIdentityCredential` fails locally | Running outside Azure | Use `az login` or set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` for a service principal (dev only) |
+
+### Managed Identity 400: "Unable to load the proper Managed Identity"
+If `/api/complete` returns HTTP 500 and logs show:
+
+```
+ManagedIdentityCredential authentication failed: Status: 400 (Bad Request)
+{"statusCode":400,"message":"Unable to load the proper Managed Identity."}
+```
+
+Causes & Fixes:
+
+1. Identity Not Attached for Code: Ensure you passed `--user-assigned $UAMI_ID` when creating the container app. Check:
+  ```bash
+  az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.template.identity.userAssignedIdentities -o json
+  ```
+  You should see the identity resource ID present.
+    If it is missing (container app created without the flag) attach it explicitly:
+    ```bash
+    UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
+    # Attach ONLY the user-assigned identity (this creates new revision)
+    az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+      --user-assigned $UAMI_ID
+
+    # (Optional) Add a system-assigned identity in addition to existing user-assigned one:
+    az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+      --system-assigned --user-assigned $UAMI_ID
+    ```
+    After update, list revisions or show the app again to confirm the identity block now includes the UAMI.
+2. Ambiguous Identity Resolution: When both system-assigned and user-assigned identities exist, `DefaultAzureCredential` may mis-resolve. Set the client ID explicitly:
+  ```bash
+  UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
+  az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+    --set-env-vars AZURE_CLIENT_ID=$UAMI_CLIENT_ID
+  ```
+  Then wait ~30 seconds and retry.
+3. Propagation Delay: Right after creating the identity and assigning roles, token endpoint may briefly not recognize it. Wait 1–2 minutes and retry.
+4. Wrong Scope: Ensure the code requests `https://cognitiveservices.azure.com/.default` (already correct in sample).
+5. Missing Role: Verify the identity has `Cognitive Services OpenAI User` at the Azure OpenAI resource scope:
+  ```bash
+  az role assignment list --assignee $UAMI_PRINCIPAL_ID --scope $OPENAI_ID -o table
+  ```
+
+Updated Code (excerpt) now prefers explicit `ManagedIdentityCredential` when `AZURE_CLIENT_ID` is set and returns a descriptive problem response if token acquisition fails.
+
 
 ### Manual Endpoint Diagnostics
 Confirm deployment exists:
