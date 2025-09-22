@@ -85,12 +85,18 @@ az acr repository show-tags -n "$ACR_NAME" --repository "$IMAGE_NAME" -o table
 Purpose: Inventory check. If nothing shows, the build failed or you queried the wrong repo name.
 
 ## 4. ACA Environment
+Make sure you have the freshest `containerapp` CLI with the ````az extension add```` command below. 
+
+
 ```bash
 az extension add --name containerapp --upgrade
+````
+
+After the command completes, create a managed environment. If it fails, it could be that the extension is not completely installed yet. If so, just try again.
+
+````
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
-Explanation: Ensures you have the freshest `containerapp` CLI then provisions the managed environment—a multi-tenant substrate you don’t manage directly (no cluster babysitting required).
-
 
 ## 5. Deploy App + Probes
 Deploy the Container App to the newly created environment. This command will create an app with an external ingress listening on port 443, that forwards traffic to your app on port 8080. Also the app will be created with specific cpu- and memory requirements and with a max number of allowed replicas set to 5.
