@@ -29,7 +29,7 @@ ls -1 app
 Pick a region that supports the model family you want (portal lists availability). Example below uses `swedencentral` — adjust as needed.
 
 ```bash
-AOAI_RESOURCE_GROUP="openai-rg-2"
+AOAI_RESOURCE_GROUP="openai-rg"
 AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
 AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
 
@@ -86,7 +86,7 @@ az cognitiveservices account deployment show \
 ## Set Variables
 
 ```bash
-RESOURCE_GROUP="aca-workshop-2-rg"          # Reuse or create
+RESOURCE_GROUP="aca-rg"          # Reuse or create
 LOCATION="westeurope"                    # Must support both ACA and your Azure OpenAI model
 ENV_NAME="aca-env"                        # Reuse from exercise 1 if desired
 APP_NAME="aca-openai-api"
