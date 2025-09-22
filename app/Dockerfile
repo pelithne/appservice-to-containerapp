@@ -8,11 +8,12 @@ ENV PYTHONDONTWRITEBYTECODE=1 \
 WORKDIR /app
 
 # Install dependencies first (better layer caching)
-COPY app/requirements.txt ./requirements.txt
+# Note: Build context is the app/ folder, so files are at root of context
+COPY requirements.txt ./requirements.txt
 RUN pip install --no-cache-dir -r requirements.txt
 
 # Copy source
-COPY app/ .
+COPY . .
 
 # Expose port FastAPI will listen on
 EXPOSE 8080
