@@ -156,7 +156,7 @@ sed -i 's|Hello from Container Apps (Python)!|Hello from Container Apps (Python)
 
 ```
 
-Then rebuild using ACR Tasks (note: avoid unescaped ! in double quotes which can trigger history expansion in bash/zsh):
+Then rebuild using ACR Tasks:
 ````bash
 az acr build --registry "$ACR_NAME" --image ${IMAGE_NAME}:v2 ./app
 
@@ -170,7 +170,7 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --image ${ACR_NAME}.a
 
 If you go to the Azure portal and look under **Revisions and replicas** you will find that a new replica is either activating like in the image below or acivated.
 
-![Revisions and replicas](./images/replicas1.png)
+![Revisions and replicas](./images/revisions1.png)
 
 
 If you navigate to your container app, and click on the **Application URL** you should find that the message has now changed:
