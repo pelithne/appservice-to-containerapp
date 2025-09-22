@@ -41,56 +41,8 @@ app/
   └── Dockerfile
 ```
 
-If starting from scratch you could create it with:
-```bash
-mkdir app
-cat > app/requirements.txt <<'REQ'
-fastapi==0.111.0
-uvicorn==0.30.1
-pydantic==2.8.2
-REQ
+Feel free to have a look at the code and the Dockerfile, to get an understanding of what it does. 
 
-cat > app/main.py <<'PY'
-from fastapi import FastAPI
-from pydantic import BaseModel
-import uvicorn, asyncio
-
-app = FastAPI(title="ACA Workshop API", version="1.0.0")
-
-class SlowResponse(BaseModel):
-    status: str
-    detail: str
-
-@app.get("/")
-async def root():
-    return {"message": "Hello from Container Apps (Python)!"}
-
-@app.get("/healthz")
-async def health():
-    return {"status": "OK"}
-
-@app.get("/slow", response_model=SlowResponse)
-async def slow():
-    await asyncio.sleep(0.5)
-    return SlowResponse(status="done", detail="Completed after simulated delay")
-
-if __name__ == "__main__":
-    uvicorn.run(app, host="0.0.0.0", port=8080)
-PY
-
-cat > app/Dockerfile <<'DOCKER'
-FROM python:3.12-slim AS base
-ENV PYTHONDONTWRITEBYTECODE=1 \\
-    PYTHONUNBUFFERED=1 \\
-    PIP_NO_CACHE_DIR=1
-WORKDIR /app
-COPY app/requirements.txt ./requirements.txt
-RUN pip install --no-cache-dir -r requirements.txt
-COPY app/ .
-EXPOSE 8080
-CMD ["uvicorn", "main:app", "--host", "0.0.0.0", "--port", "8080"]
-DOCKER
-```
 
 ## 2. Create ACR
 ```bash
