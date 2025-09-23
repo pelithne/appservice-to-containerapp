@@ -372,92 +372,6 @@ curl -s -X POST https://${APP_URL}/api/complete \
 ```
 If you see an authorization error ensure the role assignment has propagated (can take a minute). Retry after ~60s.
 
-## Troubleshooting
-| Symptom | Likely Cause | Fix |
-|---------|--------------|-----|
-| 403 Forbidden from OpenAI endpoint | Role assignment not propagated | Wait 1–3 minutes, retry |
-| 404 Deployment not found | Wrong `AOAI_DEPLOYMENT` or region mismatch | List deployments: `az cognitiveservices account deployment list -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table` |
-| 404 on /api/complete (health OK) | Responses endpoint unsupported in region/api-version; fallback not triggered yet or deployment typo | Use fallback code (added), verify deployment name, try direct chat curl |
-| 429 / Throttling | Capacity or rate limits | Lower concurrency, scale out replicas, reduce token usage |
-| Model not in list | Region lacks that model | Pick a supported model from `list-models` output |
-| `ManagedIdentityCredential` fails locally | Running outside Azure | Use `az login` or set `AZURE_TENANT_ID`, `AZURE_CLIENT_ID`, `AZURE_CLIENT_SECRET` for a service principal (dev only) |
-
-### Managed Identity 400: "Unable to load the proper Managed Identity"
-If `/api/complete` returns HTTP 500 and logs show:
-
-```
-ManagedIdentityCredential authentication failed: Status: 400 (Bad Request)
-{"statusCode":400,"message":"Unable to load the proper Managed Identity."}
-```
-
-Causes & Fixes:
-
-1. Identity Not Attached for Code: Ensure you passed `--user-assigned $UAMI_ID` when creating the container app. Check:
-  ```bash
-  az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.template.identity.userAssignedIdentities -o json
-  ```
-  You should see the identity resource ID present.
-    If it is missing (container app created without the flag) attach it explicitly:
-    ```bash
-    UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
-    # Attach ONLY the user-assigned identity (this creates new revision)
-    az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-      --user-assigned $UAMI_ID
-
-    # (Optional) Add a system-assigned identity in addition to existing user-assigned one:
-    az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-      --system-assigned --user-assigned $UAMI_ID
-    ```
-    After update, list revisions or show the app again to confirm the identity block now includes the UAMI.
-2. Ambiguous Identity Resolution: When both system-assigned and user-assigned identities exist, `DefaultAzureCredential` may mis-resolve. Set the client ID explicitly:
-  ```bash
-  UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
-  az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-    --set-env-vars AZURE_CLIENT_ID=$UAMI_CLIENT_ID
-  ```
-  Then wait ~30 seconds and retry.
-3. Propagation Delay: Right after creating the identity and assigning roles, token endpoint may briefly not recognize it. Wait 1–2 minutes and retry.
-4. Wrong Scope: Ensure the code requests `https://cognitiveservices.azure.com/.default` (already correct in sample).
-5. Missing Role: Verify the identity has `Cognitive Services OpenAI User` at the Azure OpenAI resource scope:
-  ```bash
-  az role assignment list --assignee $UAMI_PRINCIPAL_ID --scope $OPENAI_ID -o table
-  ```
-
-Updated Code (excerpt) now prefers explicit `ManagedIdentityCredential` when `AZURE_CLIENT_ID` is set and returns a descriptive problem response if token acquisition fails.
-
-
-### Manual Endpoint Diagnostics
-Confirm deployment exists:
-```bash
-az cognitiveservices account deployment list -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table
-```
-Get token & test responses endpoint directly:
-```bash
-TOKEN=$(az account get-access-token --resource https://cognitiveservices.azure.com --query accessToken -o tsv)
-curl -i -H "Authorization: Bearer $TOKEN" \
-  "https://${AOAI_ACCOUNT_NAME}.openai.azure.com/openai/deployments/${AOAI_DEPLOYMENT}/responses?api-version=${AOAI_API_VERSION}" \
-  -H 'Content-Type: application/json' \
-  -d '{"input":"ping"}'
-```
-If 404 here but deployment lists correctly, test chat:
-```bash
-curl -i -H "Authorization: Bearer $TOKEN" \
-  "https://${AOAI_ACCOUNT_NAME}.openai.azure.com/openai/deployments/${AOAI_DEPLOYMENT}/chat/completions?api-version=${AOAI_API_VERSION}" \
-  -H 'Content-Type: application/json' \
-  -d '{"messages":[{"role":"user","content":"ping"}],"max_tokens":8}'
-```
-If chat works and responses 404s, rely on fallback logic or switch permanently to chat.
-
-Quick check of effective revision & image:
-```bash
-az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" --query '[].{rev:name,img:properties.template.containers[0].image}' -o table
-```
-
-Log only errors (grep style):
-```bash
-az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --tail 200 | grep -i "problem\|fail\|error" || true
-```
-
 ## Observing Logs
 ```bash
 az containerapp logs show -n "$APP_NAME" -g "$RESOURCE_GROUP" --follow
@@ -472,18 +386,48 @@ az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --min-replicas 1 --max-replicas 10
 ```
 
-## Security Notes
-- No API keys stored; access via managed identity + RBAC.
-- Consider adding a front-end (Static Web App) that calls this API.
-- Add rate limiting or caching layer for production scenarios.
-- Use private networks / VNet integration if restricting public access.
+## Cleanup (Remove All Resources Created in This Exercise)
+The exact scope depends on whether you reused existing resource groups. Choose the option that fits your scenario.
 
-## Cleanup (This App Only)
+### 1. Just the App (keep env, ACR, identity)
 ```bash
 az containerapp delete -n "$APP_NAME" -g "$RESOURCE_GROUP" --yes
-# Optionally delete identity if no longer used
-az identity delete -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
 ```
 
----
-You have deployed a secure Azure OpenAI-backed API using Azure Container Apps and managed identity.
+### 2. App + Managed Identity + ACR Image Registry (keep ACA environment & RG)
+```bash
+az containerapp delete -n "$APP_NAME" -g "$RESOURCE_GROUP" --yes
+az identity delete -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
+az acr delete -n "$ACR_NAME" -g "$RESOURCE_GROUP" --yes
+```
+
+### 3. Full Container Apps Stack (App + Env + Identity + ACR)
+This keeps the OpenAI resource group.
+```bash
+az containerapp delete -n "$APP_NAME" -g "$RESOURCE_GROUP" --yes
+az containerapp env delete -n "$ENV_NAME" -g "$RESOURCE_GROUP" --yes
+az identity delete -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
+az acr delete -n "$ACR_NAME" -g "$RESOURCE_GROUP" --yes
+```
+
+### 4. Azure OpenAI Deployment Only (keep account)
+```bash
+az cognitiveservices account deployment delete \
+  -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
+  --deployment-name "$AOAI_DEPLOYMENT" --yes
+```
+
+### 5. Remove Azure OpenAI Account (keeps its RG)
+```bash
+az cognitiveservices account delete -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" --yes
+```
+
+### 6. Remove Resource Groups (IRREVERSIBLE)
+Only do this if the groups were created solely for this exercise and are not shared.
+```bash
+# Container Apps workload group
+az group delete -n "$RESOURCE_GROUP" --yes --no-wait
+
+# Azure OpenAI group (if created exclusively for this exercise)
+az group delete -n "$AOAI_RESOURCE_GROUP" --yes --no-wait
+```
