@@ -29,6 +29,7 @@ az provider register --namespace Microsoft.Cdn
 ```
 
 ## Variables
+Define all names and dynamic values in one place for consistency and easy reuse. Changing LOCATION or resource names here automatically flows through the rest of the exercise.
 ```bash
 RESOURCE_GROUP="aca-semisecure-rg"
 LOCATION="swedencentral"
@@ -50,11 +51,13 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 1. Container Registry (No Admin User)
+Provision an Azure Container Registry with the admin user disabled to enforce identity‑based pulls rather than shared passwords.
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Standard --admin-enabled false
 ```
 
 ## 2. Managed Identities
+Create two user-assigned managed identities: one dedicated to pulling images (least privilege) and one for runtime Key Vault access. This separation illustrates a production‑style security boundary.
 We need two separate identities: one solely for pulling from ACR (principle of least privilege), another for application data access in Key Vault. The commands below create the identities and populates envirnment variables with principal IDs.
 
 ```bash
@@ -93,6 +96,7 @@ az role assignment create \
 
 
 ## 3. Key Vault + Secret
+Enable RBAC-based Key Vault access, seed a sample secret, and grant the application identity read rights so the app can securely retrieve configuration at runtime.
 ```bash
 az keyvault create -n "$KV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION" --enable-rbac-authorization true
 az keyvault secret set --vault-name "$KV_NAME" -n "$SECRET_NAME" --value "Hello from Key Vault secured by MI!"
@@ -101,6 +105,7 @@ az role assignment create --assignee-object-id $APP_PRINCIPAL --assignee-princip
 ```
 
 ## 4. Application Source Code
+Author a minimal .NET 8 API that fetches a secret via Managed Identity. The `/mi-debug` endpoint confirms token acquisition while `/` returns the secret value, enabling transparent validation.
 ```bash
 mkdir -p secure-api && cd secure-api
 cat > Program.cs <<'EOF'
@@ -184,24 +189,26 @@ cd ..
 ```
 
 ## 5. Remote Build (ACR)
+Build the container image directly in Azure (remote build) to avoid needing local Docker and to centralize build provenance inside ACR.
 ```bash
 az acr build -r $ACR_NAME -t ${IMAGE_NAME}:v1 ./secure-api
 ```
 
 ## 6. Create Public Container App Environment
+Create a shared Container Apps environment with public ingress capability—no VNet or internal isolation in this simplified variant.
 Public environment (no VNet, no internal-only flag):
 ```bash
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 7. Deploy Container App (External Ingress)
+Deploy the application container, expose HTTPS ingress, set environment variables for Key Vault integration, and record the app’s public FQDN.
 ```bash
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --environment "$ENV_NAME" \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
-  --user-assigned $APP_IDENTITY_ID \
   --ingress external --target-port 8080 \
   --min-replicas 1 --max-replicas 3 \
   --cpu 0.25 --memory 0.5Gi \
@@ -215,6 +222,7 @@ echo $APP_EXTERNAL_FQDN
 curl -s https://$APP_EXTERNAL_FQDN/healthz
 ```
 ### Dual Managed Identity Configuration (Applied Pattern)
+Augment the deployed app with both identities, explicitly selecting which one the code should use for Key Vault and which one the platform should use for image pulls.
 
 This exercise uses a **dual identity** model:
 
@@ -252,10 +260,9 @@ curl -s https://$APP_EXTERNAL_FQDN/mi-debug | jq    # should show acquired:true
 curl -s https://$APP_EXTERNAL_FQDN/ | jq            # should return secret JSON
 ```
 
-> If you modify `Program.cs` (e.g., add new routes), you must rebuild with a new image tag and update the Container App image.
-
 
 ## 8. Azure Front Door (Standard/Premium) – Public Origin
+Place Azure Front Door in front of the public Container App for global entry, caching/WAF potential, and a production-style edge endpoint.
 Create profile + endpoint:
 ```bash
 az afd profile create -n "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --sku Standard_AzureFrontDoor
@@ -297,6 +304,7 @@ az afd route update -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
 ```
 
 ## 9. Defender for Cloud Plans
+Enable relevant Defender plans so security posture (image scanning, secret protection, runtime hardening) is evaluated automatically.
 ```bash
 az security pricing create --name ContainerRegistry --tier Standard
 az security pricing create --name KeyVaults --tier Standard
@@ -328,6 +336,7 @@ az security assessment list \
 ```
 
 ## 10. Validation
+Confirm identities are attached, secret retrieval functions end-to-end, and traffic through both the direct app endpoint and Front Door succeeds.
 ```bash
 # App identities
 az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.template.identity -o json
@@ -340,6 +349,7 @@ curl -s https://${FD_HOST}/ | jq
 ```
 
 ## 11. Cleanup
+Tear down all provisioned Azure resources to avoid ongoing costs once you have validated the scenario.
 ```bash
 az group delete -n "$RESOURCE_GROUP" --yes --no-wait
 ```
