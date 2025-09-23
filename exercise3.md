@@ -22,26 +22,36 @@ Estimated time: 60–75 minutes (depending on existing network & Front Door read
   ```
 - Permissions: Role assignments (Owner or appropriate RBAC to create identities, networks, Key Vault, Front Door, Defender plans)
 
+- Feature Registration: Microsoft.Network/AllowPrivateEndpoints
+For a later step, you will need the ````Microsoft.Cdn```` and ````Microsoft.Network```` providers registered, as well as the ````AllowPrivateEndpoints```` feature. To avoid waiting time (registration can take a while), go ahead and register it right away. 
+
+```bash
+SUBSCRIPTION_ID=$(az account show --query id -o tsv)
+az provider register --namespace Microsoft.Network --subscription $SUBSCRIPTION_ID
+az provider register --namespace Microsoft.Cdn
+az feature register --namespace Microsoft.Network --name AllowPrivateEndpoints
+```
+
 ## Variables
 ```bash
 RESOURCE_GROUP="aca-secure-rg"
-LOCATION="westeurope"                 # Must support ACA + Front Door Standard/Premium
+LOCATION="swedencentral"             # Must support ACA + Front Door Standard/Premium
 ACR_NAME="acasecacr$RANDOM"          # globally unique
 ENV_NAME="aca-secure-env"
 APP_NAME="aca-secure-api"
 IMAGE_NAME="secureapi"
 IMAGE_TAG="v1"
-UAMI_PULL_NAME="aca-acr-pull-uami"    # For ACR pull
-UAMI_APP_NAME="aca-app-uami"          # For Key Vault secret retrieval
+UAMI_PULL_NAME="aca-acr-pull-uami"  # For ACR pull
+UAMI_APP_NAME="aca-app-uami"        # For Key Vault secret retrieval
 VNET_NAME="aca-secure-vnet"
 VNET_CIDR="10.50.0.0/16"
 SUBNET_ENV="aca-env-subnet"
 SUBNET_ENV_CIDR="10.50.1.0/24"
-KV_NAME="kvacasec$RANDOM"             # globally unique (alphanumeric)
-SECRET_NAME="SampleMessage"
+KV_NAME="kvacasec$RANDOM"          # globally unique (alphanumeric)
+SECRET_NAME="SampleSecret"
 FRONTDOOR_NAME="fd-aca-secure-$RANDOM"
 FD_ENDPOINT_NAME="fd-ep-secure"
-APP_FQDN_VAR="APP_FQDN"               # local var to capture ingress FQDN if needed
+APP_FQDN_VAR="APP_FQDN"            # local var to capture ingress FQDN if needed
 ```
 
 Create resource group:
@@ -73,12 +83,51 @@ az role assignment create --assignee-object-id $PULL_PRINCIPAL --assignee-princi
 ```
 
 ## 3. Key Vault + Secret
+Create the vault with RBAC (no legacy access policies) and grant a write-capable role to *you* (the operator) **before** seeding the first secret. The application identity will only get read access.
+
+First create the Key Vault and populate $KV_ID with the keyvault identity:
 ```bash
 az keyvault create -n "$KV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION" --enable-rbac-authorization true
 KV_ID=$(az keyvault show -n "$KV_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
-# Add secret
-az keyvault secret set --vault-name "$KV_NAME" -n "$SECRET_NAME" --value "Hello from Key Vault secured by MI!"
 ```
+
+
+Grant yourself (signed-in user) least-privilege write (Secrets Officer) so you can set the seed secret
+
+
+````bash
+MY_OID=$(az ad signed-in-user show --query id -o tsv)
+az role assignment create \
+  --assignee-object-id $MY_OID \
+  --assignee-principal-type User \
+  --role "Key Vault Secrets Officer" \
+  --scope $KV_ID
+
+# (Optional alternative – broader): Key Vault Administrator (only if you need to manage RBAC or purge)
+# az role assignment create \
+#   --assignee-object-id $MY_OID \
+#   --assignee-principal-type User \
+#   --role "Key Vault Administrator" \
+#   --scope $KV_ID
+
+````
+
+Seed secret (after RBAC propagation, usually <60s). Retry if 403.
+
+
+````bash
+az keyvault secret set --vault-name "$KV_NAME" -n "$SECRET_NAME" --value "Hello from Key Vault secured by MI!"
+````
+
+Role purpose quick reference:
+
+| Role | Primary Use | Key Capabilities | Avoid Using When |
+|------|-------------|------------------|------------------|
+| Key Vault Secrets User | Application runtime (read) | Get, List secrets | You need to set / delete secrets |
+| Key Vault Secrets Officer | Seeding & rotation ops | Get, List, Set, Delete secrets (no RBAC mgmt) | You must manage RBAC / purge | 
+| Key Vault Administrator | Break-glass / full admin | All secret/keys/certs ops + RBAC assignments & purge | Routine secret rotation (over-privileged) |
+
+> Recommendation: Grant yourself *Secrets Officer* temporarily and remove it after seeding/rotation if adhering to just-in-time access.
 
 Assign `Key Vault Secrets User` to app identity (data-plane minimal secret get/list):
 ```bash
@@ -96,13 +145,35 @@ This section shows creating a VNet and placing the Container Apps Environment in
 
 > NOTE: Some networking features may require a dedicated workload profile or specific SKUs; ensure your subscription has necessary providers registered.
 
+
+Start by creating a **Virtual Network**. Add a subnet named using ````$SUBNET_ENV````
 ```bash
 az network vnet create -g "$RESOURCE_GROUP" -n "$VNET_NAME" --address-prefixes $VNET_CIDR \
   --subnet-name $SUBNET_ENV --subnet-prefixes $SUBNET_ENV_CIDR
-SUBNET_ID=$(az network vnet subnet show -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$SUBNET_ENV" --query id -o tsv)
 ```
 
-Create the *internal* ACA environment (internal only ingress):
+
+### Delegate the Subnet to Azure Container Apps
+The subnet must be delegated to `Microsoft.App/environments` before creating the environment. Without delegation you'll receive:
+
+`(ManagedEnvironmentSubnetDelegationError) The subnet of the environment must be delegated to the service 'Microsoft.App/environments'.`
+
+One way of doing this is to update the subnet that was created alongside of the VNET, with the needed delegation.
+```bash
+az network vnet subnet update \
+  -g "$RESOURCE_GROUP" \
+  --vnet-name "$VNET_NAME" \
+  -n "$SUBNET_ENV" \
+  --delegations Microsoft.App/environments \
+  --disable-private-endpoint-network-policies true
+```
+
+Put the subnet ID into and environment variable:
+````bash
+SUBNET_ID=$(az network vnet subnet show -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$SUBNET_ENV" --query id -o tsv)
+````
+
+Create the *internal* ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
 ```bash
 az containerapp env create \
   -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION" \
@@ -110,19 +181,8 @@ az containerapp env create \
   --internal-only true
 ```
 
-At this point outbound egress still defaults via the environment. To fully restrict egress you can use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. Below we illustrate private endpoints conceptually (commands abbreviated)
+At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another exercise though.
 
-### (Conceptual) Private Endpoints
-```
-# Key Vault Private Endpoint (abbreviated pattern)
-az network private-endpoint create -g $RESOURCE_GROUP -n kv-pe --vnet-name $VNET_NAME --subnet $SUBNET_ENV \
-  --private-connection-resource-id $KV_ID --group-ids vault --connection-name kv-pe-conn
-
-# ACR Private Endpoint
-az network private-endpoint create -g $RESOURCE_GROUP -n acr-pe --vnet-name $VNET_NAME --subnet $SUBNET_ENV \
-  --private-connection-resource-id $ACR_ID --group-ids registry --connection-name acr-pe-conn
-```
-You would also manage private DNS zone links. For brevity these are omitted—add zones for `privatelink.vaultcore.azure.net` and `privatelink.azurecr.io` and link to the VNet.
 
 ## 5. Application Source Code
 Simple API retrieving a secret each request (cached would be better in prod) + returns build info.
@@ -183,12 +243,20 @@ dotnet restore
 cd ..
 ```
 
-## 6. Build & Push Image (Using ACR Pull Identity)
+## 6. Build & Push Image (Using ACR Remote Build)
+Instead of building locally and pushing with Docker, leverage ACR’s cloud build service so you avoid needing a local Docker daemon (useful for CI or constrained dev boxes). Two options are shown: a one‑off on-demand build and an optional reusable ACR Task.
+
+### Option A: One-off Remote Build
 ```bash
-docker build -t ${IMAGE_NAME}:${IMAGE_TAG} ./secure-api
-docker tag ${IMAGE_NAME}:${IMAGE_TAG} ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
-docker push ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}
+az acr build \
+  -r $ACR_NAME \
+  -t ${IMAGE_NAME}:${IMAGE_TAG} \
+  ./secure-api
 ```
+This uploads the context in `./secure-api`, builds in Azure, and stores the image at:
+`${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}`
+
+
 
 ## 7. Deploy Container App
 Because environment is internal-only, ingress must be *internal*. We'll front it later with Front Door via an **insecure placeholder** public revision if needed or through a reverse proxy. (Front Door requires a publicly reachable origin; for strict private, use Azure Front Door Premium with Private Link origin – commands simplified.)
@@ -208,57 +276,118 @@ az containerapp create \
   --revision-suffix v1
 ```
 
-Add probes:
+## 8. Azure Front Door Premium with Private Link (No Public Ingress Required)
+The Container App ingress is internal-only, so in order to expose it we will use **Azure Front Door Premium** using a Private Link origin. This also means that we give our app a global reach through the CDN capabilities of Azure Front Door.
+
+> Prerequisites: Front Door Premium SKU, region support for Private Link to Container Apps, and your subscription registered with `Microsoft.Network` & `Microsoft.Cdn` providers.
+
+Run the following command to refresh the network provider with the ````````AllowPrivateEndpoints```` capability that was registered in the beginning of the exercise
+
+````bash
+az provider register --namespace Microsoft.Network
+````
+
+### 8.1 Create Front Door Premium Profile & Endpoint
+Use the modern `az afd` (Azure Front Door) command group (the older `az network front-door` form is deprecated and not installed by default).
+
+This step can take up to 5 minutes, so maybe take a leg-strecher.
+
 ```bash
-az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --set template.containers[0].probes='[
- {"type":"liveness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":5,"periodSeconds":15},
- {"type":"readiness","httpGet":{"path":"/healthz","port":8080},"initialDelaySeconds":2,"periodSeconds":5}
-]'
+az afd profile create -n "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --sku Premium_AzureFrontDoor
+
 ```
 
-## 8. Azure Front Door (Standard/Premium)
-For simplicity we create Front Door Standard pointing to the app's *internal* FQDN if exposed; in reality for fully private you would use Private Link origin (Premium) or expose via an Azure Application Gateway + Front Door chain.
-
-Get (or temporarily enable) external ingress if you need a reachable origin. (Optional workaround):
+Next, create a front door endpoint
 ```bash
-# OPTIONAL: switch to external ingress just to register Front Door origin, then revert
-az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" --ingress external --target-port 8080
-APP_FQDN=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
+
+az afd endpoint create \
+  -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME"
 ```
 
-Create Front Door:
+Create Origin Group (Health Probe over HTTPS)
 ```bash
-az network front-door profile create -n "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --sku Standard_AzureFrontDoor
+az afd origin-group create -g "$RESOURCE_GROUP" \
+  --profile-name "$FRONTDOOR_NAME" \
+  --name og-aca \
+  --probe-request-type GET \
+  --probe-protocol Https \
+  --probe-path /healthz \
+  --probe-interval-in-seconds 30 \
+  --sample-size 1 \
+  --successful-samples-required 1 \
+  --additional-latency-in-milliseconds 0
+```
 
-# Endpoint
-az network front-door endpoint create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME"
+Add Private Link Origin for Container App. We need the internal FQDN for the app (internal ingress already set):
+```bash
+APP_INTERNAL_FQDN=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
+echo $APP_INTERNAL_FQDN
+CA_ID=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
+echo $CA_ID
+```
 
-# Origin group
-az network front-door origin-group create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n og-aca \
-  --probe-request-type GET --probe-protocol HTTPS --probe-path /healthz --probe-interval-in-seconds 30
-
-# Origin (using public FQDN of container app)
-az network front-door origin create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
+Create the origin with Private Link enabled:
+```bash
+az afd origin create \
+  -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
   --origin-group-name og-aca -n aca-origin \
-  --host-name $APP_FQDN --http-port 80 --https-port 443 --priority 1 --weight 100
-
-# Route
-az network front-door route create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
-  -n route-api --endpoint-name "$FD_ENDPOINT_NAME" --origin-group og-aca \
-  --supported-protocols Http Https --patterns-to-match "/*" --forwarding-protocol MatchRequest
+  --host-name $APP_INTERNAL_FQDN \
+  --https-port 443 --http-port 80 \
+  --priority 1 --weight 100 \
+  --enable-private-link true \
+  --private-link-resource $CA_ID \
+  --private-link-sub-resource containerApp \
+  --private-link-location "$LOCATION" \
+  --private-link-request-message "Front Door access to Container App"
 ```
 
-Now (optionally) revert container app ingress to internal-only + use Premium + Private Link for production (not fully scripted here due to complexity).
 
-Retrieve Front Door endpoint:
+
+
+
+### 8.4 Approve Private Link (if needed)
+Check for a pending approval (status may auto-approve in some subscriptions):
 ```bash
-FD_HOST=$(az network front-door endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME" --query hostName -o tsv)
+az afd private-endpoint-connection list \
+  --profile-name "$FRONTDOOR_NAME" \
+  -g "$RESOURCE_GROUP" \
+  --query '[].{id:id, status:properties.privateLinkServiceConnectionState.status, desc:properties.privateLinkServiceConnectionState.description}'
+```
+If status shows `Pending`, approve (sample using first ID):
+```bash
+FD_PEC_ID=$(az afd private-endpoint-connection list \
+  --profile-name "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --query '[0].id' -o tsv)
+az afd private-endpoint-connection approve --ids $FD_PEC_ID --description "Approve Front Door to Container App"
 ```
 
-Test:
+### 8.5 Create Route
 ```bash
+az afd route create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
+  --endpoint-name "$FD_ENDPOINT_NAME" -n route-api \
+  --origin-group og-aca \
+  --supported-protocols Http Https \
+  --patterns-to-match "/*" \
+  --forwarding-protocol MatchRequest
+```
+
+### 8.6 Retrieve Front Door Host & Test
+```bash
+FD_HOST=$(az afd endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME" --query hostName -o tsv)
 curl -s https://${FD_HOST}/ | jq
 ```
+
+If you receive 502 initially, the private endpoint may still be provisioning—wait 1–2 minutes and retry.
+
+### Optional: WAF Policy (Recommended)
+```bash
+az afd waf-policy create -g "$RESOURCE_GROUP" -n fd-waf-secure --mode Prevention --sku Premium_AzureFrontDoor
+az afd route update -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
+  --endpoint-name "$FD_ENDPOINT_NAME" -n route-api --waf-policy fd-waf-secure
+```
+
+### (Fallback Quick Test Path)
+If your region or subscription does not yet support Private Link for Container Apps, you can temporarily switch the app ingress to external, register the origin (Standard SKU), then revert—this earlier approach is omitted here for brevity but available in prior revisions.
+
 
 ## 9. Microsoft Defender for Cloud Enablement
 Enable plan(s) for Container Registries, Container Apps (via App Service plan coverage) and Key Vault.
@@ -273,6 +402,115 @@ az security pricing create --name AppServices --tier Standard
 ```
 (Plans may already exist; commands are idempotent.)
 
+### 9.1 Make Practical Use of Defender for Cloud
+You just turned plans on; below are fast, hands‑on ways to *use* them during (or shortly after) the workshop.
+
+> Propagation time: It can take 10–20 minutes after first enabling plans for the first recommendations / vulnerability scan data to appear. If something returns empty, wait a bit and retry.
+
+#### A. Verify Plans & Coverage
+```bash
+az security pricing list -o table | egrep 'ContainerRegistry|KeyVaults|AppServices'
+```
+Expect `Standard` for the three enabled resource types.
+
+#### B. Container Registry Image Vulnerability Findings
+1. List manifest metadata for the repository (new command – replaces deprecated `az acr repository show-manifests`):
+  ```bash
+  # NOTE:
+  #  - 'az acr repository show-manifests' is DEPRECATED.
+  #  - Some manifests may have null tags (multi‑arch index vs. image); use a null-safe filter.
+  #  - list-metadata returns an array: [{ digest, tags, architecture, os, ... }]
+  az acr manifest list-metadata \
+    -r $ACR_NAME --name $IMAGE_NAME \
+    --query "[?tags && contains(@.tags, '${IMAGE_TAG}')].{digest:digest, tags:tags}" -o json
+  ```
+2. (After scans complete) pull vulnerability metadata (field names can evolve):
+  ```bash
+  # Capture the digest for the tag of interest (null-safe: only evaluate contains() when tags exists)
+  DIGEST=$(az acr manifest list-metadata -r $ACR_NAME --name $IMAGE_NAME \
+          --query "[?tags && contains(@.tags, '${IMAGE_TAG}')].digest | [0]" -o tsv)
+  echo "Selected digest: $DIGEST"
+  az acr manifest show-metadata -r $ACR_NAME --name ${IMAGE_NAME}@${DIGEST} -o jsonc 2>/dev/null \
+    || echo "Scan results not ready yet (digest=$DIGEST)"
+  ```
+   Look for a `scanResult` / `security` or `vulnerabilities` node listing CVEs with severity.
+
+Optional quick way to generate some findings (harmless demo): rebuild using an older .NET runtime base image (e.g., pin to a prior patch) and push/tag as `vuln-demo`; rescans will surface additional CVEs.
+
+#### C. Key Vault Hardening Recommendations
+Common Defender recommendations for Key Vault include enabling purge protection & soft delete (soft delete is on by default now). Check your vault settings:
+```bash
+az keyvault show -n $KV_NAME -g $RESOURCE_GROUP \
+  --query '{purgeProtection:properties.enablePurgeProtection, softDelete:properties.enableSoftDelete, retentionDays:properties.softDeleteRetentionInDays}' -o json
+```
+If purge protection is `false` you can (irreversible once enabled):
+```bash
+az keyvault update -n $KV_NAME -g $RESOURCE_GROUP --enable-purge-protection true
+```
+(Only do this if you are OK with the vault's destructive operations being further restricted; for a throwaway workshop environment you may skip.)
+
+#### D. View Security Recommendations (All Services)
+```bash
+az security assessment list --query "[].{name:name, status:status.code, resource:resources[0].id}" -o table | head -n 20
+```
+Status codes: `Healthy`, `Unhealthy`, or `NotApplicable`. Focus on `Unhealthy` for actionable fixes.
+
+Filter just Container Registry related:
+```bash
+az security assessment list \
+  --query "[?contains(resources[0].id, 'Microsoft.ContainerRegistry/registries')].{name:name,status:status.code}" -o table
+```
+
+#### E. Simulate a Vulnerable Image (Optional Demo)
+Add (intentionally) an outdated package to produce medium/high CVEs:
+```bash
+cat > secure-api/Dockerfile.vuln <<'EOF'
+FROM mcr.microsoft.com/dotnet/sdk:8.0 AS build
+WORKDIR /src
+COPY . .
+RUN dotnet add package Newtonsoft.Json --version 12.0.1 >/dev/null 2>&1 || true
+RUN dotnet publish -c Release -o /out
+FROM mcr.microsoft.com/dotnet/aspnet:8.0
+WORKDIR /app
+COPY --from=build /out .
+ENV ASPNETCORE_URLS=http://0.0.0.0:8080
+EXPOSE 8080
+ENTRYPOINT ["dotnet", "secure-api.dll"]
+EOF
+
+az acr build -r $ACR_NAME -t ${IMAGE_NAME}:vuln-demo -f secure-api/Dockerfile.vuln ./secure-api
+```
+After build completes, wait ~5–10 min then re-run the manifest metadata step for `vuln-demo` tag to see extra findings.
+
+#### F. Container App Runtime Posture
+Container Apps runtime (control plane / underlying App Service) inherits recommendations under the `AppServices` coverage. Look at any active assessments for configuration drift, TLS, or diagnostic logging:
+```bash
+az security assessment list \
+  --query "[?contains(resources[0].id, 'Microsoft.App/containerApps')].{name:name,status:status.code}" -o table
+```
+(If empty, no immediate posture recommendations yet.)
+
+#### G. Alerting & Notifications (Optional)
+Enable security contact (email) so critical alerts mail you (once):
+```bash
+az security contact create -n default --email "you@example.com" --alert-notifications On --alerts-admins On
+```
+
+#### H. (Advanced) Continuous Export / SIEM
+If you want to stream recommendations & alerts (not required for workshop):
+1. Create / identify a Log Analytics workspace.
+2. Enable continuous export (Portal: Defender for Cloud > Environment settings > Continuous export) or via ARM template / REST.
+
+#### I. Cleaning Up Demo Artifacts
+If you built a vulnerable demo image and want to remove it:
+```bash
+az acr repository delete -n $ACR_NAME --image ${IMAGE_NAME}:vuln-demo --yes
+```
+
+---
+At this point you have: image vulnerability insights, Key Vault hardening signals, and (optionally) a simulated vulnerable image to illustrate remediation workflow.
+
+
 ## 10. Validation
 ```bash
 # Check identities on the app
@@ -282,10 +520,6 @@ az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.temp
 curl -s https://${FD_HOST}/ | jq
 ```
 
-## 11. (Optional) Lock Down After Front Door
-- Revert ACA to internal ingress only.
-- Use Front Door Premium + Private Link origin to keep origin private.
-- Add WAF policy: `az network front-door waf-policy create ...` and link to route.
 
 ## 12. Cleanup
 ```bash
@@ -293,20 +527,4 @@ curl -s https://${FD_HOST}/ | jq
 az group delete -n "$RESOURCE_GROUP" --yes --no-wait
 ```
 
----
-## Design Rationale & Best Practices Summary
-- Separate identities for image pull and app operations = least privilege.
-- RBAC (AcrPull, Key Vault Secrets User) instead of vault access policies.
-- No admin credentials on ACR; all pulls via workload identity.
-- Key Vault accessed dynamically; could add local in-memory cache.
-- Private networking + Front Door provides global entry + future WAF.
-- Defender plans surface image scanning, secret misuse, configuration drift.
 
-## Next Steps
-- Add CI/CD pipeline generating image & auto-redeploy (GitHub Actions with OIDC).
-- Implement Key Vault secret rotation + caching.
-- Use Front Door Premium + Private Link for fully private origin.
-- Add rate limiting + WAF custom rules.
-- Add Bicep or Terraform infra for declarative reproducibility.
-
-Enjoy securing your containerized workloads!
