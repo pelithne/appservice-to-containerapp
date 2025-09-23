@@ -1,4 +1,4 @@
-# Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private Egress, Defender for Cloud, Azure Front Door
+# Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private ingress, Azure Front Door, Defender for Cloud
 
 This exercise layers production‑grade security and networking features onto an Azure Container Apps (ACA) workload. You will:
 
@@ -33,39 +33,42 @@ az feature register --namespace Microsoft.Network --name AllowPrivateEndpoints
 ```
 
 ## Variables
+
+Create some environment variables, to use in subsequent commands.
 ```bash
 RESOURCE_GROUP="aca-secure-rg"
-LOCATION="swedencentral"             # Must support ACA + Front Door Standard/Premium
-ACR_NAME="acasecacr$RANDOM"          # globally unique
-ENV_NAME="aca-secure-env"
-APP_NAME="aca-secure-api"
-IMAGE_NAME="secureapi"
-IMAGE_TAG="v1"
+LOCATION="swedencentral"            # Must support ACA + Front Door Standard/Premium
+ACR_NAME="acasecacr$RANDOM"         # globally unique
+ENV_NAME="aca-secure-env"           # Container app environment name
+APP_NAME="aca-secure-api"           # Name of the container app
+IMAGE_NAME="secureapi"              # Image name to use in ACR
 UAMI_PULL_NAME="aca-acr-pull-uami"  # For ACR pull
 UAMI_APP_NAME="aca-app-uami"        # For Key Vault secret retrieval
-VNET_NAME="aca-secure-vnet"
-VNET_CIDR="10.50.0.0/16"
-SUBNET_ENV="aca-env-subnet"
-SUBNET_ENV_CIDR="10.50.1.0/24"
-KV_NAME="kvacasec$RANDOM"          # globally unique (alphanumeric)
-SECRET_NAME="SampleSecret"
-FRONTDOOR_NAME="fd-aca-secure-$RANDOM"
-FD_ENDPOINT_NAME="fd-ep-secure"
+VNET_NAME="aca-secure-vnet"         # Vnet name for container app vnet
+VNET_CIDR="10.50.0.0/16"            # Network range for container app vnet
+SUBNET_ENV="aca-env-subnet"         # Container app dedicated subnet name
+SUBNET_ENV_CIDR="10.50.1.0/24"      # Container app dedicated subnet range
+KV_NAME="kvacasec$RANDOM"           # globally unique and alphanumeric
+SECRET_NAME="SampleSecret"          # Name of example secret
+FRONTDOOR_NAME="fd-aca-secure-$RANDOM" # Unique name for frontdoor
+FD_ENDPOINT_NAME="fd-ep-secure"    # Frontdoor endpoint name
 APP_FQDN_VAR="APP_FQDN"            # local var to capture ingress FQDN if needed
 ```
 
-Create resource group:
+Create resource group
 ```bash
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 1. Create ACR (No Admin User)
+Create a new stanradr tier Azure Container Registry. Disable admin access (username/password based access)
+
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Standard --admin-enabled false
 ```
 
 ## 2. Managed Identities
-Two identities: one solely for pulling from ACR (principle of least privilege), another for application data access (Key Vault).
+We need two separate identities: one solely for pulling from ACR (principle of least privilege), another for application data access in Key Vault. The commands below create the identities and populates envirnment variables with principal IDs.
 ```bash
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME"
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME"
@@ -76,13 +79,13 @@ APP_PRINCIPAL=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --quer
 ```
 
 ### Grant ACR Pull Role
-Use built‑in `AcrPull` role at the minimal scope.
+Create the role assignemnt to allow the container app identity to **pull** images from container registry, using the built‑in `AcrPull` role at the minimal scope.
 ```bash
 ACR_ID=$(az acr show -n "$ACR_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
 az role assignment create --assignee-object-id $PULL_PRINCIPAL --assignee-principal-type ServicePrincipal --scope $ACR_ID --role "AcrPull"
 ```
 
-## 3. Key Vault + Secret
+### Key Vault + Secret
 Create the vault with RBAC (no legacy access policies) and grant a write-capable role to *you* (the operator) **before** seeding the first secret. The application identity will only get read access.
 
 First create the Key Vault and populate $KV_ID with the keyvault identity:
@@ -90,10 +93,7 @@ First create the Key Vault and populate $KV_ID with the keyvault identity:
 az keyvault create -n "$KV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION" --enable-rbac-authorization true
 KV_ID=$(az keyvault show -n "$KV_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
 ```
-
-
 Grant yourself (signed-in user) least-privilege write (Secrets Officer) so you can set the seed secret
-
 
 ````bash
 MY_OID=$(az ad signed-in-user show --query id -o tsv)
@@ -103,17 +103,9 @@ az role assignment create \
   --role "Key Vault Secrets Officer" \
   --scope $KV_ID
 
-# (Optional alternative – broader): Key Vault Administrator (only if you need to manage RBAC or purge)
-# az role assignment create \
-#   --assignee-object-id $MY_OID \
-#   --assignee-principal-type User \
-#   --role "Key Vault Administrator" \
-#   --scope $KV_ID
-
 ````
 
-Seed secret (after RBAC propagation, usually <60s). Retry if 403.
-
+Create the secret in keyvault. If the command fails, it is most likely because the role assignment has not propagated. If that happens, wait a minute and try again.
 
 ````bash
 az keyvault secret set --vault-name "$KV_NAME" -n "$SECRET_NAME" --value "Hello from Key Vault secured by MI!"
@@ -140,11 +132,8 @@ az role assignment create \
 
 (If using purge protection / soft delete defaults, retention is already enabled.)
 
-## 4. (Optional) Private Networking & Restricted Egress
+##  Private Networking for Container App
 This section shows creating a VNet and placing the Container Apps Environment in an internal subnet (no public ingress). Later we publish through Azure Front Door.
-
-> NOTE: Some networking features may require a dedicated workload profile or specific SKUs; ensure your subscription has necessary providers registered.
-
 
 Start by creating a **Virtual Network**. Add a subnet named using ````$SUBNET_ENV````
 ```bash
@@ -244,17 +233,16 @@ cd ..
 ```
 
 ## 6. Build & Push Image (Using ACR Remote Build)
-Instead of building locally and pushing with Docker, leverage ACR’s cloud build service so you avoid needing a local Docker daemon (useful for CI or constrained dev boxes). Two options are shown: a one‑off on-demand build and an optional reusable ACR Task.
+Instead of building locally and pushing with Docker, leverage ACR’s cloud build service so you avoid needing a local Docker daemon (useful for CI or constrained dev boxes). 
 
-### Option A: One-off Remote Build
 ```bash
 az acr build \
   -r $ACR_NAME \
-  -t ${IMAGE_NAME}:${IMAGE_TAG} \
+  -t ${IMAGE_NAME}:v1 \
   ./secure-api
 ```
 This uploads the context in `./secure-api`, builds in Azure, and stores the image at:
-`${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}`
+`${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1`
 
 
 
@@ -265,7 +253,7 @@ Because environment is internal-only, ingress must be *internal*. We'll front it
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --environment "$ENV_NAME" \
-  --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG} \
+  --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
   --registry-identity $PULL_ID \
   --user-assigned $APP_IDENTITY_ID \
@@ -281,11 +269,6 @@ The Container App ingress is internal-only, so in order to expose it we will use
 
 > Prerequisites: Front Door Premium SKU, region support for Private Link to Container Apps, and your subscription registered with `Microsoft.Network` & `Microsoft.Cdn` providers.
 
-Run the following command to refresh the network provider with the ````````AllowPrivateEndpoints```` capability that was registered in the beginning of the exercise
-
-````bash
-az provider register --namespace Microsoft.Network
-````
 
 ### 8.1 Create Front Door Premium Profile & Endpoint
 Use the modern `az afd` (Azure Front Door) command group (the older `az network front-door` form is deprecated and not installed by default).
@@ -297,7 +280,7 @@ az afd profile create -n "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --sku Premium_Az
 
 ```
 
-Next, create a front door endpoint
+Next, create a **Front Door Endpoint**
 ```bash
 
 az afd endpoint create \
@@ -318,7 +301,7 @@ az afd origin-group create -g "$RESOURCE_GROUP" \
   --additional-latency-in-milliseconds 0
 ```
 
-Add Private Link Origin for Container App. We need the internal FQDN for the app (internal ingress already set):
+Add Private Link Origin for Container App. We need the internal FQDN for the app and we also need the ID of the container app.
 ```bash
 APP_INTERNAL_FQDN=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
 echo $APP_INTERNAL_FQDN
@@ -326,7 +309,7 @@ CA_ID=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query id -o t
 echo $CA_ID
 ```
 
-Create the origin with Private Link enabled:
+Now, create the origin with Private Link enabled. 
 ```bash
 az afd origin create \
   -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
@@ -341,33 +324,17 @@ az afd origin create \
   --private-link-request-message "Front Door access to Container App"
 ```
 
-
-
-
-
-### 8.4 Approve Private Link (if needed)
-Check for a pending approval (status may auto-approve in some subscriptions):
-```bash
-az afd private-endpoint-connection list \
-  --profile-name "$FRONTDOOR_NAME" \
-  -g "$RESOURCE_GROUP" \
-  --query '[].{id:id, status:properties.privateLinkServiceConnectionState.status, desc:properties.privateLinkServiceConnectionState.description}'
-```
-If status shows `Pending`, approve (sample using first ID):
-```bash
-FD_PEC_ID=$(az afd private-endpoint-connection list \
-  --profile-name "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --query '[0].id' -o tsv)
-az afd private-endpoint-connection approve --ids $FD_PEC_ID --description "Approve Front Door to Container App"
-```
-
 ### 8.5 Create Route
+
+Azure front door needs a route to the backend. In this case, anything on http and https is routed to the container app.
 ```bash
 az afd route create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
   --endpoint-name "$FD_ENDPOINT_NAME" -n route-api \
   --origin-group og-aca \
   --supported-protocols Http Https \
   --patterns-to-match "/*" \
-  --forwarding-protocol MatchRequest
+  --forwarding-protocol MatchRequest \
+  --link-to-default-domain Enabled
 ```
 
 ### 8.6 Retrieve Front Door Host & Test
@@ -385,9 +352,6 @@ az afd route update -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
   --endpoint-name "$FD_ENDPOINT_NAME" -n route-api --waf-policy fd-waf-secure
 ```
 
-### (Fallback Quick Test Path)
-If your region or subscription does not yet support Private Link for Container Apps, you can temporarily switch the app ingress to external, register the origin (Standard SKU), then revert—this earlier approach is omitted here for brevity but available in prior revisions.
-
 
 ## 9. Microsoft Defender for Cloud Enablement
 Enable plan(s) for Container Registries, Container Apps (via App Service plan coverage) and Key Vault.
@@ -402,64 +366,7 @@ az security pricing create --name AppServices --tier Standard
 ```
 (Plans may already exist; commands are idempotent.)
 
-### 9.1 Make Practical Use of Defender for Cloud
-You just turned plans on; below are fast, hands‑on ways to *use* them during (or shortly after) the workshop.
 
-> Propagation time: It can take 10–20 minutes after first enabling plans for the first recommendations / vulnerability scan data to appear. If something returns empty, wait a bit and retry.
-
-#### A. Verify Plans & Coverage
-```bash
-az security pricing list -o table | egrep 'ContainerRegistry|KeyVaults|AppServices'
-```
-Expect `Standard` for the three enabled resource types.
-
-#### B. Container Registry Image Vulnerability Findings
-1. List manifest metadata for the repository (new command – replaces deprecated `az acr repository show-manifests`):
-  ```bash
-  # NOTE:
-  #  - 'az acr repository show-manifests' is DEPRECATED.
-  #  - Some manifests may have null tags (multi‑arch index vs. image); use a null-safe filter.
-  #  - list-metadata returns an array: [{ digest, tags, architecture, os, ... }]
-  az acr manifest list-metadata \
-    -r $ACR_NAME --name $IMAGE_NAME \
-    --query "[?tags && contains(@.tags, '${IMAGE_TAG}')].{digest:digest, tags:tags}" -o json
-  ```
-2. (After scans complete) pull vulnerability metadata (field names can evolve):
-  ```bash
-  # Capture the digest for the tag of interest (null-safe: only evaluate contains() when tags exists)
-  DIGEST=$(az acr manifest list-metadata -r $ACR_NAME --name $IMAGE_NAME \
-          --query "[?tags && contains(@.tags, '${IMAGE_TAG}')].digest | [0]" -o tsv)
-  echo "Selected digest: $DIGEST"
-  az acr manifest show-metadata -r $ACR_NAME --name ${IMAGE_NAME}@${DIGEST} -o jsonc 2>/dev/null \
-    || echo "Scan results not ready yet (digest=$DIGEST)"
-  ```
-   Look for a `scanResult` / `security` or `vulnerabilities` node listing CVEs with severity.
-
-Optional quick way to generate some findings (harmless demo): rebuild using an older .NET runtime base image (e.g., pin to a prior patch) and push/tag as `vuln-demo`; rescans will surface additional CVEs.
-
-#### C. Key Vault Hardening Recommendations
-Common Defender recommendations for Key Vault include enabling purge protection & soft delete (soft delete is on by default now). Check your vault settings:
-```bash
-az keyvault show -n $KV_NAME -g $RESOURCE_GROUP \
-  --query '{purgeProtection:properties.enablePurgeProtection, softDelete:properties.enableSoftDelete, retentionDays:properties.softDeleteRetentionInDays}' -o json
-```
-If purge protection is `false` you can (irreversible once enabled):
-```bash
-az keyvault update -n $KV_NAME -g $RESOURCE_GROUP --enable-purge-protection true
-```
-(Only do this if you are OK with the vault's destructive operations being further restricted; for a throwaway workshop environment you may skip.)
-
-#### D. View Security Recommendations (All Services)
-```bash
-az security assessment list --query "[].{name:name, status:status.code, resource:resources[0].id}" -o table | head -n 20
-```
-Status codes: `Healthy`, `Unhealthy`, or `NotApplicable`. Focus on `Unhealthy` for actionable fixes.
-
-Filter just Container Registry related:
-```bash
-az security assessment list \
-  --query "[?contains(resources[0].id, 'Microsoft.ContainerRegistry/registries')].{name:name,status:status.code}" -o table
-```
 
 #### E. Simulate a Vulnerable Image (Optional Demo)
 Add (intentionally) an outdated package to produce medium/high CVEs:
@@ -490,16 +397,7 @@ az security assessment list \
 ```
 (If empty, no immediate posture recommendations yet.)
 
-#### G. Alerting & Notifications (Optional)
-Enable security contact (email) so critical alerts mail you (once):
-```bash
-az security contact create -n default --email "you@example.com" --alert-notifications On --alerts-admins On
-```
 
-#### H. (Advanced) Continuous Export / SIEM
-If you want to stream recommendations & alerts (not required for workshop):
-1. Create / identify a Log Analytics workspace.
-2. Enable continuous export (Portal: Defender for Cloud > Environment settings > Continuous export) or via ARM template / REST.
 
 #### I. Cleaning Up Demo Artifacts
 If you built a vulnerable demo image and want to remove it:
