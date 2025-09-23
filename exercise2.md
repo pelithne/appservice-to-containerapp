@@ -28,12 +28,25 @@ ls -1 app
 ### Create Azure OpenAI Resource
 Pick a region that supports the model family you want (portal lists availability). Example below uses `swedencentral` — adjust as needed.
 
+Start by setting some environment variables
+
 ```bash
 AOAI_RESOURCE_GROUP="openai-rg"
 AOAI_LOCATION="swedencentral"           # Must be a region that has Azure OpenAI capacity for your target model
-AOAI_ACCOUNT_NAME="aoai$RANDOM"        # Globally unique
+AOAI_ACCOUNT_NAME="aoai$RANDOM"         # Globally unique
+```
+
+Then create the Resource Group for the Azure Open AI Service
+
+````bash
 
 az group create -n "$AOAI_RESOURCE_GROUP" -l "$AOAI_LOCATION"
+
+````
+
+Now go ahead and create the cognitive services account, and validate by using ````az cognitiveservices account show ````
+
+````bash
 
 az cognitiveservices account create \
   -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
@@ -50,18 +63,22 @@ First discover models and versions actually available to YOUR subscription in TH
 # Raw list (can be long)
 az cognitiveservices account list-models -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" -o table
 
-
 ```
 
 Select deployment name & capacity. Azure OpenAI currently distinguishes between legacy `Standard` and pooled `GlobalStandard` SKUs. Some newer GPT-4o variants ONLY support `GlobalStandard`. If a deployment fails with `DeploymentModelNotSupported` try switching the SKU or a different version.
 
-Create the deployment:
+Create the deployment using gpt4o-mini. First define som more environment variables:
 ```bash
-AOAI_DEPLOYMENT="gpt4o-mini"             # Your deployment handle (free-form, lowercase recommended)
-BASE_MODEL=${BASE_MODEL:-gpt-4o-mini}     # Ensure set from above
-MODEL_VERSION=${MODEL_VERSION:-2024-07-18} # Fallback if auto-pick not used
-DEPLOY_SKU="GlobalStandard"              # Try GlobalStandard first for GPT-4o family
-CAPACITY=30                               # GlobalStandard often needs higher min capacity; reduce if allowed
+AOAI_DEPLOYMENT="gpt4o-mini"                # Your deployment handle (free-form, lowercase recommended)
+BASE_MODEL=${BASE_MODEL:-gpt-4o-mini}       # Ensure set from above
+MODEL_VERSION=${MODEL_VERSION:-2024-07-18}  # Fallback if auto-pick not used
+DEPLOY_SKU="GlobalStandard"                 # Try GlobalStandard first for GPT-4o family
+CAPACITY=30                                 # GlobalStandard often needs higher min capacity; reduce if allowed
+```
+
+The create the cognitiveservices deployment
+
+````bash
 
 az cognitiveservices account deployment create \
   -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
@@ -77,45 +94,52 @@ az cognitiveservices account deployment create \
 #   2) A different SKU (Standard vs GlobalStandard)
 #   3) A different region that lists the desired version
 
+````
+
+Make sure all looks right: 
+
+````bash
 az cognitiveservices account deployment show \
   -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" \
   --deployment-name "$AOAI_DEPLOYMENT" \
   --query '{deployment:name,model:properties.model.name,version:properties.model.version,sku:sku.name,status:properties.provisioningState}' -o table
-```
+````
 
-## Set Variables
+## Create Container App
+
+Now its time to create the container app that will use the Azure OpenAI resource. We start out by creating yet another collection of environment variables:
 
 ```bash
-RESOURCE_GROUP="aca-rg"          # Reuse or create
-LOCATION="westeurope"                    # Must support both ACA and your Azure OpenAI model
-ENV_NAME="aca-env"                        # Reuse from exercise 1 if desired
+RESOURCE_GROUP="aca-rg"               # Reuse or create
+LOCATION="westeurope"                 # Must support both ACA and your Azure OpenAI model
+ENV_NAME="aca-env"                    # Reuse from exercise 1 if desired
 APP_NAME="aca-openai-api"
-ACR_NAME="acaworkshop$RANDOM"            # If you need a new registry
+ACR_NAME="acaworkshop$RANDOM"         # If you need a new registry
 IMAGE_NAME="openaiapi"
 IMAGE_TAG="v1"
 UAMI_NAME="aca-openai-uami"
-AOAI_API_VERSION="2024-08-01-preview"     # Use a supported api-version
+AOAI_API_VERSION="2024-08-01-preview" # Use a supported api-version
 ```
 
-Create (or ensure) resource group for container app:
+Create resource group for container app:
 ```bash
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## Create ACR
+Then create the Azure Container registry
 
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
 
-## Create User Assigned Managed Identity (MUST happen before role assignments)
+After this, create User Assigned Managed Identity
+
 ```bash
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
 UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
 UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
 UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
 ```
-> WARNING: If you skip this step and try to reference the identity's principalId later (for ACR or OpenAI role assignments) you will get a `ResourceNotFound` error.
 
 ### Grant the Managed Identity ACR Pull Permission
 Unlike AKS (where `az aks update -n CLUSTER -g RG --attach-acr ACR_NAME` wires up the cluster's kubelet identity automatically), Azure Container Apps requires you to explicitly assign the `AcrPull` role to the user‑assigned managed identity when you rely on that identity for image pulls.
@@ -149,6 +173,9 @@ az role assignment create \
 > Role assignment propagation may take 30–120 seconds. If you get 403s immediately after deployment, wait and retry.
 
 ## Create Source Code
+
+What we are doing here is just piping text from the commandline into a few files. Its convenient to do it this way, because we can use the environment varibles defined previously, like ````AOAI_ENDPOINT```` and ````AOAI_API_VERSION````. Less copy-paste. Please spend some time to look at the source code though, or have an LLM like copilot explain it.
+
 ```bash
 mkdir -p openai-api && cd openai-api
 cat > Program.cs <<'EOF'
