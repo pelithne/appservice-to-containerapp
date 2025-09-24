@@ -111,7 +111,7 @@ Now its time to create the container app that will use the Azure OpenAI resource
 
 ```bash
 RESOURCE_GROUP="aca-rg"               # Reuse or create
-LOCATION="westeurope"                 # Must support both ACA and your Azure OpenAI model
+LOCATION="swedencentral"                 # Must support both ACA and your Azure OpenAI model
 ENV_NAME="aca-env"                    # Reuse from exercise 1 if desired
 APP_NAME="aca-openai-api"
 ACR_NAME="acaworkshop$RANDOM"         # If you need a new registry
