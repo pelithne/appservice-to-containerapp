@@ -1,6 +1,6 @@
 # Exercise 3 (Alt 2): Secure Container Apps – Managed Identity, Public Ingress, Azure Front Door (Standard), Defender for Cloud
 
-This alternative version uses a **public (external) Container App ingress** instead of an internal-only environment + Private Link. It is suitable for simpler demos or when private networking is not required. For production, prefer the Private Link model in `exercise3.md`.
+This alternative version uses a **public (external) Container App ingress** instead of an internal-only environment + Private Link. For production, prefer the Private Link model in `exercise3.md`.
 
 ## Objectives
 1. Managed identity (no admin / no ACR password) for image pulls from ACR
