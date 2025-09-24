@@ -10,7 +10,7 @@ This exercise layers production‑grade security and networking features onto an
 
 ---
 ## Prerequisites
-- Completion of Exercise 1 (base ACA environment) OR create fresh resources
+- Completion of Exercise 1 & 2 OR create fresh resources
 - Azure CLI ≥ 2.53 and `containerapp` + `front-door` extensions:
   ```bash
   az extension add --name containerapp --upgrade
@@ -18,37 +18,24 @@ This exercise layers production‑grade security and networking features onto an
   ```
 - Permissions: Role assignments (Owner or appropriate RBAC to create identities, networks, Key Vault, Front Door, Defender plans)
 
-- Feature Registration: Microsoft.Network/AllowPrivateEndpoints
-For a later step, you will need the ````Microsoft.Cdn```` and ````Microsoft.Network```` providers registered, as well as the ````AllowPrivateEndpoints```` feature. To avoid waiting time (registration can take a while), go ahead and register it right away. 
-
-```bash
-SUBSCRIPTION_ID=$(az account show --query id -o tsv)
-az provider register --namespace Microsoft.Network --subscription $SUBSCRIPTION_ID
-az provider register --namespace Microsoft.Cdn --subscription $SUBSCRIPTION_ID
-```
-
 ## Variables
 
 Create some environment variables, to use in subsequent commands.
 ```bash
 RESOURCE_GROUP="aca-secure-rg"
-LOCATION="swedencentral"            # Must support ACA + Front Door Standard/Premium
-ACR_NAME="acasecacr$RANDOM"         # globally unique
-ENV_NAME="aca-secure-env"           # Container app environment name
-APP_NAME="aca-secure-api"           # Name of the container app
-IMAGE_NAME="secureapi"              # Image name to use in ACR
-UAMI_PULL_NAME="aca-acr-pull-uami"  # For ACR pull
-UAMI_APP_NAME="aca-app-uami"        # For Key Vault secret retrieval
-VNET_NAME="aca-secure-vnet"         # Vnet name for container app vnet
-VNET_CIDR="10.50.0.0/16"            # Network range for container app vnet
-SUBNET_ENV="aca-env-subnet"         # Container app dedicated subnet name
-SUBNET_ENV_CIDR="10.50.1.0/24"      # Container app dedicated subnet range
-KV_NAME="kvacasec$RANDOM"           # globally unique and alphanumeric
-SECRET_NAME="SampleSecret"          # Name of example secret
-FRONTDOOR_NAME="fd-aca-secure-$RANDOM" # Unique name for frontdoor
-FD_ENDPOINT_NAME="fd-ep-secure"    # Frontdoor endpoint name
-APP_FQDN_VAR="APP_FQDN"            # local var to capture ingress FQDN if 
-AFD_ORIGIN_GROUP="og-aca"          # Frontdoor origin group
+LOCATION="swedencentral"                # Must support ACA + Front Door Standard/Premium
+ACR_NAME="acasecacr$RANDOM"             # globally unique
+ENV_NAME="aca-secure-env"               # Container app environment name
+APP_NAME="aca-secure-api"               # Name of the container app
+IMAGE_NAME="secureapi"                  # Image name to use in ACR
+UAMI_PULL_NAME="aca-acr-pull-uami"      # For ACR pull
+UAMI_APP_NAME="aca-app-uami"            # For Key Vault secret retrieval
+KV_NAME="kvacasec$RANDOM"               # globally unique and alphanumeric
+SECRET_NAME="SampleSecret"              # Name of example secret
+FRONTDOOR_NAME="fd-aca-secure-$RANDOM"  # Unique name for frontdoor
+FD_ENDPOINT_NAME="fd-ep-secure"         # Frontdoor endpoint name
+APP_FQDN_VAR="APP_FQDN"                 # local var to capture ingress FQDN if 
+AFD_ORIGIN_GROUP="og-aca"               # Frontdoor origin group
 ```
 
 Create resource group
@@ -329,7 +316,7 @@ az afd route create \
   --link-to-default-domain Enabled
 ```
 
-### 8.6 Retrieve Front Door Host & Test
+### Retrieve Front Door Host & Test
 ```bash
 FD_HOST=$(az afd endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME" --query hostName -o tsv)
 
@@ -340,7 +327,7 @@ FD_HOST=$(az afd endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_N
 
 curl the endpoint: 
 ````bash
-curl -s https://${FD_HOST}/healthz | jq
+curl -s https://${FD_HOST}/healthz
 ````
 
 
