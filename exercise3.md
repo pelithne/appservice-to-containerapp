@@ -69,21 +69,11 @@ az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Standard --admin-enabled
 ```
 
 ## 2. Managed Identities
-We need two separate identities: one solely for pulling from ACR (principle of least privilege), another for application data access in Key Vault. The commands below create the identities and populates envirnment variables with principal IDs.
+The commands below create the identity for accessing the kayvault secret from the container app, and populates envirnment variables.
 ```bash
-az identity create -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME"
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME"
-PULL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME" --query id -o tsv)
-PULL_PRINCIPAL=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME" --query principalId -o tsv)
 APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
 APP_PRINCIPAL=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query principalId -o tsv)
-```
-
-### Grant ACR Pull Role
-Create the role assignemnt to allow the container app identity to **pull** images from container registry, using the built‑in `AcrPull` role at the minimal scope.
-```bash
-ACR_ID=$(az acr show -n "$ACR_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
-az role assignment create --assignee-object-id $PULL_PRINCIPAL --assignee-principal-type ServicePrincipal --scope $ACR_ID --role "AcrPull"
 ```
 
 ### Key Vault + Secret
