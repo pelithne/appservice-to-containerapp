@@ -113,6 +113,8 @@ az containerapp create \
   --cpu 0.25 --memory 0.5Gi \
   --revision-suffix v1
 ```
+> Note: Azure auto‑provisions a default one (`DefaultWorkspace-<region>-<guid>`) and immediately streams container stdout/stderr + platform logs there.
+> This gives you instant log querying; you can later attach a different workspace to tune retention and cost.
 
 When this command finishes, you can go to the Azure portal and check your **Container App**. It should look similar to the image below, and there should be an *Application Url* that you can click on to confirm that your app is up and running.
 
