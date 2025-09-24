@@ -234,7 +234,7 @@ Because environment is internal-only, we'll front it later with Front Door to ex
 
 ```bash
 az containerapp create \
-  -n "babababab" -g "$RESOURCE_GROUP" \
+  -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --environment "$ENV_NAME" \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
