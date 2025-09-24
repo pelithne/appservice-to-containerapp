@@ -56,7 +56,7 @@ Create resource group
 az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## 1. Create ACR (No Admin User)
+## Create ACR (No Admin User)
 Create a new standard tier Azure Container Registry. Disable admin access (username/password based access)
 
 ```bash
@@ -127,7 +127,7 @@ az containerapp env update \
 At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another exercise though.
 
 
-## 5. Application Source Code
+##  Application Source Code
 Before crating the caontainer app, we need to have some code. Below is a simple API that retrieves a secret for each request coming in (cached would be better in prod) + returns that info. Notice that all the code is inline, so there is no need to clone a repo to get files into your file system.
 ```bash
 mkdir -p secure-api && cd secure-api
@@ -186,7 +186,7 @@ dotnet restore
 cd ..
 ```
 
-## 6. Build & Push Image (Using ACR Remote Build)
+##  Build & Push Image (Using ACR Remote Build)
 Instead of building locally and pushing with Docker, leverage ACR’s cloud build service so you avoid needing a local Docker daemon (useful for CI or constrained dev boxes). 
 
 ```bash
@@ -200,7 +200,7 @@ This uploads the context in `./secure-api`, builds in Azure, and stores the imag
 
 
 
-## 7. Deploy Container App
+##  Deploy Container App
 Because environment is internal-only, we'll front it later with Front Door to expose the app to the public internet.
 
 ```bash
@@ -246,13 +246,13 @@ ACA_ENDPOINT=$(az containerapp show \
 ````
 
 
-## 8. Azure Front Door Premium with Private Link (No Public Ingress Required)
+##  Azure Front Door Premium with Private Link (No Public Ingress Required)
 The Container App ingress is internal-only, so in order to expose it we will use **Azure Front Door Premium** using a Private Link origin. This also means that we give our app a global reach through the CDN capabilities of Azure Front Door.
 
 > Prerequisites: Front Door Premium SKU, region support for Private Link to Container Apps, and your subscription registered with `Microsoft.Network` & `Microsoft.Cdn` providers.
 
 
-### 8.1 Create Front Door Premium Profile & Endpoint
+###  Create Front Door Premium Profile & Endpoint
 Use the modern `az afd` (Azure Front Door) command group (the older `az network front-door` form is deprecated and not installed by default).
 
 This step can take up to 5 minutes, so maybe take a leg-strecher.
@@ -313,7 +313,7 @@ PEC_ID=$(az network private-endpoint-connection list --id $ENV_ID --query "[0].i
 az network private-endpoint-connection approve --id $PEC_ID --description "Approve Front Door"
 ````
 
-### 8.5 Create Route
+###  Create Route
 
 Azure front door needs a route to the backend. In this case, anything on http and https is routed to the container app.
 ```bash
@@ -354,7 +354,7 @@ az afd route update -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
 ```
 
 
-## 9. Microsoft Defender for Cloud Enablement
+##  Microsoft Defender for Cloud Enablement
 Enable plan(s) for Container Registries, Container Apps (via App Service plan coverage) and Key Vault.
 ```bash
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
@@ -369,7 +369,7 @@ az security pricing create --name AppServices --tier Standard
 
 
 
-#### E. Simulate a Vulnerable Image (Optional Demo)
+### Simulate a Vulnerable Image (Optional Demo)
 Add (intentionally) an outdated package to produce medium/high CVEs:
 ```bash
 cat > secure-api/Dockerfile.vuln <<'EOF'
@@ -390,7 +390,7 @@ az acr build -r $ACR_NAME -t ${IMAGE_NAME}:vuln-demo -f secure-api/Dockerfile.vu
 ```
 After build completes, wait ~5–10 min then re-run the manifest metadata step for `vuln-demo` tag to see extra findings.
 
-#### F. Container App Runtime Posture
+### Container App Runtime Posture
 Container Apps runtime (control plane / underlying App Service) inherits recommendations under the `AppServices` coverage. Look at any active assessments for configuration drift, TLS, or diagnostic logging:
 ```bash
 az security assessment list \
@@ -400,7 +400,7 @@ az security assessment list \
 
 
 
-#### I. Cleaning Up Demo Artifacts
+### Cleaning Up Demo Artifacts
 If you built a vulnerable demo image and want to remove it:
 ```bash
 az acr repository delete -n $ACR_NAME --image ${IMAGE_NAME}:vuln-demo --yes
