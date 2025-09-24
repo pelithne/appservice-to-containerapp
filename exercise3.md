@@ -1,4 +1,4 @@
-AFD_ORIGIN_GROUP="og-aca"  # Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private ingress, Azure Front Door, Defender for Cloud
+# Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private ingress, Azure Front Door, Defender for Cloud
 
 This exercise layers production‑grade security and networking features onto an Azure Container Apps (ACA) workload. You will:
 
