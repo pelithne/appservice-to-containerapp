@@ -4,13 +4,9 @@ This exercise layers production‑grade security and networking features onto an
 
 1. Use a managed identity (no admin / no ACR password) for image pulls from ACR
 2. Store a secret in Azure Key Vault and access it from the container at runtime via managed identity
-3. Restrict outbound (egress) and make the app private behind an internal environment with a workload profile + VNet (conceptual steps) and expose safely via Azure Front Door
+3. Restrict outbound (egress) and make the app private and expose safely via Azure Front Door
 4. Enable Microsoft Defender for Cloud plans relevant to containers & Key Vault
 5. Validate everything with test commands
-
-> NOTE: Some steps require specific regional support and/or existing virtual networks. Adjust names & regions accordingly. Where full creation would be long, concise CLI snippets + rationale are provided.
-
-Estimated time: 60–75 minutes (depending on existing network & Front Door readiness)
 
 ---
 ## Prerequisites
@@ -28,8 +24,7 @@ For a later step, you will need the ````Microsoft.Cdn```` and ````Microsoft.Netw
 ```bash
 SUBSCRIPTION_ID=$(az account show --query id -o tsv)
 az provider register --namespace Microsoft.Network --subscription $SUBSCRIPTION_ID
-az provider register --namespace Microsoft.Cdn
-az feature register --namespace Microsoft.Network --name AllowPrivateEndpoints
+az provider register --namespace Microsoft.Cdn --subscription $SUBSCRIPTION_ID
 ```
 
 ## Variables
@@ -62,22 +57,25 @@ az group create -n "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
 ## 1. Create ACR (No Admin User)
-Create a new stanradr tier Azure Container Registry. Disable admin access (username/password based access)
+Create a new standard tier Azure Container Registry. Disable admin access (username/password based access)
 
 ```bash
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Standard --admin-enabled false
 ```
 
 ## 2. Managed Identities
-The commands below create the identity for accessing the kayvault secret from the container app, and populates envirnment variables.
+Create identity for the container app to fetch secret from Key Vault
 ```bash
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME"
 APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
 APP_PRINCIPAL=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query principalId -o tsv)
+APP_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query clientId -o tsv)
 ```
 
 ### Key Vault + Secret
-Create the vault with RBAC (no legacy access policies) and grant a write-capable role to *you* (the operator) **before** seeding the first secret. The application identity will only get read access.
+Create the vault with RBAC (no legacy access policies) and grant a write-capable role to *you* (the operator) **before** seeding the first secret. This is to make you able to create a secret in the key vault
+
+The application identity will only get read access, with the ````Key Vault Secrets User```` role.
 
 First create the Key Vault and populate $KV_ID with the keyvault identity:
 ```bash
@@ -120,21 +118,19 @@ az role assignment create \
   --role "Key Vault Secrets User"
 ```
 
-(If using purge protection / soft delete defaults, retention is already enabled.)
 
+Create the  ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
 
-
-Create the  ACA environment. This can take a couple of minutes.
-```bash
+````bash
 az containerapp env create \
   -n "$ENV_NAME" \
   -g "$RESOURCE_GROUP" \
   -l "$LOCATION"
-```
+````
 
 Retrieve the environment ID. You use this ID to configure the environment.
-````bash
 
+````bash
 ENV_ID=$(az containerapp env show \
     --resource-group $RESOURCE_GROUP \
     --name $ENV_NAME \
@@ -144,14 +140,20 @@ ENV_ID=$(az containerapp env show \
 
 Disable public network access for the environment
 
+This command requires that you have preview enabled on the containerapp commands
+
+````bash
+az extension add --name containerapp --upgrade --allow-preview true
+````
+
+Now, go ahead and disable public network access
 ````bash
 az containerapp env update \
     --id $ENV_ID \
     --public-network-access Disabled
-
 ````
 
-At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another workshop though...
+At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another exercise though.
 
 
 ## 5. Application Source Code
@@ -228,7 +230,7 @@ This uploads the context in `./secure-api`, builds in Azure, and stores the imag
 
 
 ## 7. Deploy Container App
-Because environment is internal-only, ingress must be *internal*. We'll front it later with Front Door to expose the app to the public internet.
+Because environment is internal-only, we'll front it later with Front Door to expose the app to the public internet.
 
 ```bash
 az containerapp create \
@@ -236,8 +238,7 @@ az containerapp create \
   --environment "$ENV_NAME" \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
-  --registry-identity $PULL_ID \
-  --user-assigned $APP_IDENTITY_ID \
+  --user-assigned $APP_CLIENT_ID \
   --ingress external \
   --target-port 8080 \
   --min-replicas 1 --max-replicas 3 \
@@ -246,7 +247,8 @@ az containerapp create \
   --revision-suffix v1
 ```
 
-Retrive the container app endpoint
+
+Retrive the container app endpoint. This will be used to create an origin for Azure Front Door.
 ````bash
 ACA_ENDPOINT=$(az containerapp show \
     --name $APP_NAME \
@@ -255,47 +257,6 @@ ACA_ENDPOINT=$(az containerapp show \
     --output tsv)
 ````
 
-
-### Dual Managed Identity Configuration (Applied Pattern)
-Augment the deployed app with both identities, explicitly selecting which one the code should use for Key Vault and which one the platform should use for image pulls.
-
-This exercise uses a **dual identity** model:
-
-| Purpose | Identity | Roles |
-|---------|----------|-------|
-| Image pulls from ACR | Pull identity (`$UAMI_PULL_NAME`) | `AcrPull` on the ACR scope |
-| Key Vault secret access | App identity (`$UAMI_APP_NAME`) | `Key Vault Secrets User` on the vault scope |
-
-Both identities are attached to the Container App. The application code sets `ManagedIdentityCredential` with an explicit client ID via the `AZURE_CLIENT_ID` environment variable so the Key Vault calls always use the app identity (and not the pull identity).
-
-Create environment variables for the different identities.
-```bash
-PULL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME" --query id -o tsv)
-APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
-APP_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query clientId -o tsv)
-```
-
-
-Attach / ensure both identities on the Container App (idempotent)
-````bash
-az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --user-assigned $APP_IDENTITY_ID $PULL_ID
-````
-
-
-Designate the pull identity for ACR
-````bash
-az containerapp registry set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --server ${ACR_NAME}.azurecr.io --identity $PULL_ID
-````
-
-
-Inject AZURE_CLIENT_ID so the app selects the Key Vault identity
-````bash
-az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --set-env-vars AZURE_CLIENT_ID=$APP_CLIENT_ID \
-  --revision-suffix setappid
-````
 
 
 
@@ -317,7 +278,6 @@ az afd profile create -n "$FRONTDOOR_NAME" -g "$RESOURCE_GROUP" --sku Premium_Az
 
 Next, create a **Front Door Endpoint**
 ```bash
-
 az afd endpoint create \
   -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME"
 ```
@@ -344,7 +304,7 @@ ENV_ID=$(az containerapp env show --resource-group $RESOURCE_GROUP --name $ENV_N
 
 ```
 
-Now, create the origin with Private Link enabled. 
+Now, create the origin with Private Link enabled. This step usually takes a bit of time. Leg-stretcher?
 ```bash
 az afd origin create \
   --resource-group "$RESOURCE_GROUP" \
@@ -361,15 +321,24 @@ az afd origin create \
   --private-link-request-message "Front Door access to Container App"
 ```
 
+Now, you need to approve the Private Endpoint Connection, so that the container app allows connections from front door.
+````bash
+PEC_ID=$(az network private-endpoint-connection list --id $ENV_ID --query "[0].id" -o tsv)
+az network private-endpoint-connection approve --id $PEC_ID --description "Approve Front Door"
+````
+
 ### 8.5 Create Route
 
 Azure front door needs a route to the backend. In this case, anything on http and https is routed to the container app.
 ```bash
-az afd route create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
-  --endpoint-name "$FD_ENDPOINT_NAME" -n route-api \
-  --origin-group og-aca \
+az afd route create \
+  --resource-group "$RESOURCE_GROUP" \
+  --profile-name "$FRONTDOOR_NAME" \
+  --endpoint-name "$FD_ENDPOINT_NAME" \
+  --route-name "route-api2" \
+  --origin-group $AFD_ORIGIN_GROUP \
   --supported-protocols Http Https \
-  --patterns-to-match "/*" \
+  --https-redirect Enabled \
   --forwarding-protocol MatchRequest \
   --link-to-default-domain Enabled
 ```
@@ -380,16 +349,12 @@ FD_HOST=$(az afd endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_N
 
 ```
 
-Now, you need to approve the private endpoint connection, so that the container app allows connections from front door.
-````bash
-PEC_ID=$(az network private-endpoint-connection list --id $ENV_ID --query "[0].id" -o tsv)
-az network private-endpoint-connection approve --id $PEC_ID --description "Approve Front Door"
-````
+
 
 
 curl the endpoint: 
 ````bash
-curl -s https://${FD_HOST}/ | jq
+curl -s https://${FD_HOST}/healthz | jq
 ````
 
 
