@@ -105,7 +105,7 @@ az cognitiveservices account deployment show \
   --query '{deployment:name,model:properties.model.name,version:properties.model.version,sku:sku.name,status:properties.provisioningState}' -o table
 ````
 
-## Create Container App
+## Container App
 
 Now its time to create the container app that will use the Azure OpenAI resource. We start out by creating yet another collection of environment variables:
 
@@ -132,7 +132,7 @@ Then create the Azure Container registry
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
 
-After this, create User Assigned Managed Identity
+After this, create User Assigned Managed Identity for the container app to be able to access Azure OpenAI
 
 ```bash
 az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
@@ -141,38 +141,8 @@ UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query c
 UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
 ```
 
-### Grant the Managed Identity ACR Pull Permission
-Unlike AKS (where `az aks update -n CLUSTER -g RG --attach-acr ACR_NAME` wires up the cluster's kubelet identity automatically), Azure Container Apps requires you to explicitly assign the `AcrPull` role to the user‑assigned managed identity when you rely on that identity for image pulls.
 
-1. Assign `AcrPull`:
-```bash
-ACR_ID=$(az acr show -n "$ACR_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
-az role assignment create \
-  --assignee-object-id $UAMI_PRINCIPAL_ID \
-  --assignee-principal-type ServicePrincipal \
-  --role AcrPull \
-  --scope $ACR_ID
-```
-2. (Optional) Verify:
-```bash
-az role assignment list --assignee $UAMI_PRINCIPAL_ID --scope $ACR_ID -o table
-```
-
-> Why this step? Container Apps only auto-resolves registry credentials if: (a) admin credentials are enabled (we disabled them for security), or (b) you specify a managed identity with the proper role via `--registry-identity`. The role assignment makes the identity authorized; specifying it during create tells the platform which identity to use.
-
-## Assign Azure OpenAI Role (RBAC for Managed Identity)
-Grant the managed identity the least-privilege role needed to invoke completions: `Cognitive Services OpenAI User`.
-```bash
-OPENAI_ID=$(az resource show -g "$AOAI_RESOURCE_GROUP" -n "$AOAI_ACCOUNT_NAME" --resource-type "Microsoft.CognitiveServices/accounts" --query id -o tsv)
-az role assignment create \
-  --assignee-object-id $(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv) \
-  --assignee-principal-type ServicePrincipal \
-  --role "Cognitive Services OpenAI User" \
-  --scope "$OPENAI_ID"
-```
-> Role assignment propagation may take 30–120 seconds. If you get 403s immediately after deployment, wait and retry.
-
-## Create Source Code
+### Create Source Code
 
 What we are doing here is just piping text from the commandline into a few files. Its convenient to do it this way, because we can use the environment varibles defined previously, like ````AOAI_ENDPOINT```` and ````AOAI_API_VERSION````. Less copy-paste. Please spend some time to look at the source code though, or have an LLM like copilot explain it.
 
@@ -317,7 +287,7 @@ dotnet restore
 cd ..
 ```
 
-## Build & Push Image (Remote ACR Build – Cloud Shell Friendly)
+### Build & Push Image (Remote ACR Build – Cloud Shell Friendly)
 Use Azure Container Registry's remote build so you don't need a local Docker daemon (ideal for Azure Cloud Shell):
 ```bash
 # Queue a remote build from the local folder (context path) and tag the image
@@ -329,12 +299,12 @@ az acr repository show-tags -n ${ACR_NAME} --repository ${IMAGE_NAME} -o table
 
 
 
-## Crate ACA Environment 
+### Crate ACA Environment 
 ```bash
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
 ```
 
-## Deploy Container App (Attach Managed Identity & Use It for ACR)
+### Deploy Container App
 ```bash
 az containerapp create \
   -n "$APP_NAME" -g "$RESOURCE_GROUP" \
@@ -342,8 +312,6 @@ az containerapp create \
   --image "${ACR_NAME}.azurecr.io/${IMAGE_NAME}:${IMAGE_TAG}" \
   --ingress external --target-port 8080 \
   --registry-server "${ACR_NAME}.azurecr.io" \
-  --registry-identity "$UAMI_ID" \
-  --user-assigned "$UAMI_ID" \
   --cpu 0.5 --memory 1Gi \
   --min-replicas 1 --max-replicas 3 \
   --env-vars \
@@ -355,9 +323,6 @@ az containerapp create \
 
 
 ```
-
-
-
 
 
 ## Test the Endpoint
