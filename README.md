@@ -1,4 +1,4 @@
-# App Service to Azure Container Apps Workshop
+# Azure Container Apps Workshop
 
 This repository contains a progressive workshop showing how to:
 
