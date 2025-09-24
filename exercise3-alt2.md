@@ -233,22 +233,30 @@ This exercise uses a **dual identity** model:
 
 Both identities are attached to the Container App. The application code sets `ManagedIdentityCredential` with an explicit client ID via the `AZURE_CLIENT_ID` environment variable so the Key Vault calls always use the app identity (and not the pull identity).
 
-Add after identity creation (Step 2) once roles are assigned:
+Create environment variables for the different identities.
 ```bash
-# Capture IDs (if not already)
 PULL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME" --query id -o tsv)
 APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
 APP_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query clientId -o tsv)
+```
 
-# Attach / ensure both identities on the Container App (idempotent)
+
+Attach / ensure both identities on the Container App (idempotent)
+````bash
 az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --user-assigned $APP_IDENTITY_ID $PULL_ID
+````
 
-# Designate the pull identity for ACR (post-create)
+
+Designate the pull identity for ACR
+````bash
 az containerapp registry set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --server ${ACR_NAME}.azurecr.io --identity $PULL_ID
+````
 
-# Inject AZURE_CLIENT_ID so the app selects the Key Vault identity
+
+Inject AZURE_CLIENT_ID so the app selects the Key Vault identity
+````bash
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --set-env-vars AZURE_CLIENT_ID=$APP_CLIENT_ID \
   --revision-suffix setappid
