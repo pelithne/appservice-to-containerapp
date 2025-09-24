@@ -53,9 +53,9 @@ The application we are containerizing is veeeery simple. It's just a tiny bit of
 Project layout:
 ```
 app/
-  ├── main.py
-  ├── requirements.txt
-  └── Dockerfile
+  ├── Dockerfile
+  ├── main.py 
+  └── requirements.txt
 ```
 
 Feel free to have a look at the code and the Dockerfile, to get an understanding of what it does. 
