@@ -234,11 +234,11 @@ Because environment is internal-only, we'll front it later with Front Door to ex
 
 ```bash
 az containerapp create \
-  -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  -n "babababab" -g "$RESOURCE_GROUP" \
   --environment "$ENV_NAME" \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
-  --user-assigned $APP_CLIENT_ID \
+  --user-assigned $APP_IDENTITY_ID \
   --ingress external \
   --target-port 8080 \
   --min-replicas 1 --max-replicas 3 \
@@ -256,8 +256,6 @@ ACA_ENDPOINT=$(az containerapp show \
     --query properties.configuration.ingress.fqdn \
     --output tsv)
 ````
-
-
 
 
 ## 8. Azure Front Door Premium with Private Link (No Public Ingress Required)
