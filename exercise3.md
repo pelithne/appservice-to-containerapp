@@ -139,7 +139,7 @@ Create the  ACA environment (internal only ingress). If this fails, it could be 
 az containerapp env create \
   -n "$ENV_NAME" \
   -g "$RESOURCE_GROUP" \
-  -l "$LOCATION" \
+  -l "$LOCATION"
 ```
 
 Retrieve the environment ID. You use this ID to configure the environment.
