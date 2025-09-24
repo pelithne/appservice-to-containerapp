@@ -132,45 +132,36 @@ az role assignment create \
 
 (If using purge protection / soft delete defaults, retention is already enabled.)
 
-##  Private Networking for Container App
-This section shows creating a VNet and placing the Container Apps Environment in an internal subnet (no public ingress). Later we publish through Azure Front Door.
-
-Start by creating a **Virtual Network**. Add a subnet named using ````$SUBNET_ENV````
-```bash
-az network vnet create -g "$RESOURCE_GROUP" -n "$VNET_NAME" --address-prefixes $VNET_CIDR \
-  --subnet-name $SUBNET_ENV --subnet-prefixes $SUBNET_ENV_CIDR
-```
 
 
-### Delegate the Subnet to Azure Container Apps
-The subnet must be delegated to `Microsoft.App/environments` before creating the environment. Without delegation you'll receive:
-
-`(ManagedEnvironmentSubnetDelegationError) The subnet of the environment must be delegated to the service 'Microsoft.App/environments'.`
-
-One way of doing this is to update the subnet that was created alongside of the VNET, with the needed delegation.
-```bash
-az network vnet subnet update \
-  -g "$RESOURCE_GROUP" \
-  --vnet-name "$VNET_NAME" \
-  -n "$SUBNET_ENV" \
-  --delegations Microsoft.App/environments \
-  --private-endpoint-network-policies Disabled
-```
-
-Put the subnet ID into and environment variable:
-````bash
-SUBNET_ID=$(az network vnet subnet show -g "$RESOURCE_GROUP" --vnet-name "$VNET_NAME" -n "$SUBNET_ENV" --query id -o tsv)
-````
-
-Create the *internal* ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
+Create the  ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
 ```bash
 az containerapp env create \
-  -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION" \
-  --infrastructure-subnet-resource-id $SUBNET_ID \
-  --internal-only true
+  -n "$ENV_NAME" \
+  -g "$RESOURCE_GROUP" \
+  -l "$LOCATION" \
 ```
 
-At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another exercise though.
+Retrieve the environment ID. You use this ID to configure the environment.
+````bash
+
+ENVIRONMENT_ID=$(az containerapp env show \
+    --resource-group $RESOURCE_GROUP \
+    --name $ENV_NAME \
+    --query "id" \
+    --output tsv)
+````
+
+Disable public network access for the environment
+
+````bash
+az containerapp env update \
+    --id $ENVIRONMENT_ID \
+    --public-network-access Disabled
+
+````
+
+At this point outbound egress still defaults via the environment. To fully restrict egress you could use a NAT gateway, Azure Firewall, or Private Endpoints for ACR & Key Vault. This is for another workshop though...
 
 
 ## 5. Application Source Code
