@@ -333,12 +333,6 @@ curl -s https://${FD_HOST}/healthz
 
 If you receive 502 initially, the private endpoint may still be provisioning—wait 1–2 minutes and retry.
 
-### Optional: WAF Policy (Recommended)
-```bash
-az afd waf-policy create -g "$RESOURCE_GROUP" -n fd-waf-secure --mode Prevention --sku Premium_AzureFrontDoor
-az afd route update -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
-  --endpoint-name "$FD_ENDPOINT_NAME" -n route-api --waf-policy fd-waf-secure
-```
 
 
 ##  Microsoft Defender for Cloud Enablement
