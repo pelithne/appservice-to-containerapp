@@ -260,7 +260,7 @@ Inject AZURE_CLIENT_ID so the app selects the Key Vault identity
 az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --set-env-vars AZURE_CLIENT_ID=$APP_CLIENT_ID \
   --revision-suffix setappid
-```
+````
 
 After the update, verify:
 ```bash
