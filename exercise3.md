@@ -63,15 +63,6 @@ Create a new standard tier Azure Container Registry. Disable admin access (usern
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Standard --admin-enabled false
 ```
 
-## 2. Managed Identities
-Create identity for the container app to fetch secret from Key Vault
-```bash
-az identity create -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME"
-APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
-APP_PRINCIPAL=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query principalId -o tsv)
-APP_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query clientId -o tsv)
-```
-
 ### Key Vault + Secret
 Create the vault with RBAC (no legacy access policies) and grant a write-capable role to *you* (the operator) **before** seeding the first secret. This is to make you able to create a secret in the key vault
 
@@ -98,26 +89,6 @@ Create the secret in keyvault. If the command fails, it is most likely because t
 ````bash
 az keyvault secret set --vault-name "$KV_NAME" -n "$SECRET_NAME" --value "Hello from Key Vault secured by MI!"
 ````
-
-Role purpose quick reference:
-
-| Role | Primary Use | Key Capabilities | Avoid Using When |
-|------|-------------|------------------|------------------|
-| Key Vault Secrets User | Application runtime (read) | Get, List secrets | You need to set / delete secrets |
-| Key Vault Secrets Officer | Seeding & rotation ops | Get, List, Set, Delete secrets (no RBAC mgmt) | You must manage RBAC / purge | 
-| Key Vault Administrator | Break-glass / full admin | All secret/keys/certs ops + RBAC assignments & purge | Routine secret rotation (over-privileged) |
-
-> Recommendation: Grant yourself *Secrets Officer* temporarily and remove it after seeding/rotation if adhering to just-in-time access.
-
-Assign `Key Vault Secrets User` to app identity (data-plane minimal secret get/list):
-```bash
-az role assignment create \
-  --assignee-object-id $APP_PRINCIPAL \
-  --assignee-principal-type ServicePrincipal \
-  --scope $KV_ID \
-  --role "Key Vault Secrets User"
-```
-
 
 Create the  ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
 
@@ -238,7 +209,6 @@ az containerapp create \
   --environment "$ENV_NAME" \
   --image ${ACR_NAME}.azurecr.io/${IMAGE_NAME}:v1 \
   --registry-server ${ACR_NAME}.azurecr.io \
-  --user-assigned $APP_IDENTITY_ID \
   --ingress external \
   --target-port 8080 \
   --min-replicas 1 --max-replicas 3 \
@@ -246,6 +216,24 @@ az containerapp create \
   --env-vars KEYVAULT_URL="https://$KV_NAME.vault.azure.net/" SECRET_NAME="$SECRET_NAME" \
   --revision-suffix v1
 ```
+
+
+Now, lets capture the **System Managed Identity** of the container app, and give it reader permissions in the key vault
+
+````bash
+SYS_PRINCIPAL=$(az containerapp show -n $APP_NAME -g $RESOURCE_GROUP --query identity.principalId -o tsv)
+````
+Grant Key Vault Secrets User
+
+````bash
+KV_ID=$(az keyvault show -n $KV_NAME -g $RESOURCE_GROUP --query id -o tsv)
+az role assignment create \
+  --assignee-object-id $SYS_PRINCIPAL \
+  --assignee-principal-type ServicePrincipal \
+  --scope $KV_ID \
+  --role "Key Vault Secrets User"
+````
+
 
 
 Retrive the container app endpoint. This will be used to create an origin for Azure Front Door.
