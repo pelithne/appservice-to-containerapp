@@ -1,4 +1,4 @@
-# Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private ingress, Azure Front Door, Defender for Cloud
+AFD_ORIGIN_GROUP="og-aca"  # Exercise 3: Secure Container Apps – Managed Identity to ACR & Key Vault, Private ingress, Azure Front Door, Defender for Cloud
 
 This exercise layers production‑grade security and networking features onto an Azure Container Apps (ACA) workload. You will:
 
@@ -52,7 +52,8 @@ KV_NAME="kvacasec$RANDOM"           # globally unique and alphanumeric
 SECRET_NAME="SampleSecret"          # Name of example secret
 FRONTDOOR_NAME="fd-aca-secure-$RANDOM" # Unique name for frontdoor
 FD_ENDPOINT_NAME="fd-ep-secure"    # Frontdoor endpoint name
-APP_FQDN_VAR="APP_FQDN"            # local var to capture ingress FQDN if needed
+APP_FQDN_VAR="APP_FQDN"            # local var to capture ingress FQDN if 
+AFD_ORIGIN_GROUP="og-aca"          # Frontdoor origin group
 ```
 
 Create resource group
@@ -102,7 +103,6 @@ az role assignment create \
   --assignee-principal-type User \
   --role "Key Vault Secrets Officer" \
   --scope $KV_ID
-
 ````
 
 Create the secret in keyvault. If the command fails, it is most likely because the role assignment has not propagated. If that happens, wait a minute and try again.
@@ -154,7 +154,7 @@ az network vnet subnet update \
   --vnet-name "$VNET_NAME" \
   -n "$SUBNET_ENV" \
   --delegations Microsoft.App/environments \
-  --disable-private-endpoint-network-policies true
+  --private-endpoint-network-policies Disabled
 ```
 
 Put the subnet ID into and environment variable:
@@ -174,7 +174,7 @@ At this point outbound egress still defaults via the environment. To fully restr
 
 
 ## 5. Application Source Code
-Simple API retrieving a secret each request (cached would be better in prod) + returns build info.
+Before crating the caontainer app, we need to have some code. Below is a simple API that retrieves a secret for each request coming in (cached would be better in prod) + returns that info. Notice that all the code is inline, so there is no need to clone a repo to get files into your file system.
 ```bash
 mkdir -p secure-api && cd secure-api
 cat > Program.cs <<'EOF'
@@ -247,7 +247,7 @@ This uploads the context in `./secure-api`, builds in Azure, and stores the imag
 
 
 ## 7. Deploy Container App
-Because environment is internal-only, ingress must be *internal*. We'll front it later with Front Door via an **insecure placeholder** public revision if needed or through a reverse proxy. (Front Door requires a publicly reachable origin; for strict private, use Azure Front Door Premium with Private Link origin – commands simplified.)
+Because environment is internal-only, ingress must be *internal*. We'll front it later with Front Door to expose the app to the public internet.
 
 ```bash
 az containerapp create \
@@ -257,12 +257,66 @@ az containerapp create \
   --registry-server ${ACR_NAME}.azurecr.io \
   --registry-identity $PULL_ID \
   --user-assigned $APP_IDENTITY_ID \
-  --ingress internal --target-port 8080 \
+  --ingress external \
+  --target-port 8080 \
   --min-replicas 1 --max-replicas 3 \
   --cpu 0.25 --memory 0.5Gi \
   --env-vars KEYVAULT_URL="https://$KV_NAME.vault.azure.net/" SECRET_NAME="$SECRET_NAME" \
   --revision-suffix v1
 ```
+
+Retrive the container app endpoint
+````bash
+ACA_ENDPOINT=$(az containerapp show \
+    --name $APP_NAME \
+    --resource-group $RESOURCE_GROUP \
+    --query properties.configuration.ingress.fqdn \
+    --output tsv)
+````
+
+
+### Dual Managed Identity Configuration (Applied Pattern)
+Augment the deployed app with both identities, explicitly selecting which one the code should use for Key Vault and which one the platform should use for image pulls.
+
+This exercise uses a **dual identity** model:
+
+| Purpose | Identity | Roles |
+|---------|----------|-------|
+| Image pulls from ACR | Pull identity (`$UAMI_PULL_NAME`) | `AcrPull` on the ACR scope |
+| Key Vault secret access | App identity (`$UAMI_APP_NAME`) | `Key Vault Secrets User` on the vault scope |
+
+Both identities are attached to the Container App. The application code sets `ManagedIdentityCredential` with an explicit client ID via the `AZURE_CLIENT_ID` environment variable so the Key Vault calls always use the app identity (and not the pull identity).
+
+Create environment variables for the different identities.
+```bash
+PULL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_PULL_NAME" --query id -o tsv)
+APP_IDENTITY_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query id -o tsv)
+APP_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_APP_NAME" --query clientId -o tsv)
+```
+
+
+Attach / ensure both identities on the Container App (idempotent)
+````bash
+az containerapp identity assign -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --user-assigned $APP_IDENTITY_ID $PULL_ID
+````
+
+
+Designate the pull identity for ACR
+````bash
+az containerapp registry set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --server ${ACR_NAME}.azurecr.io --identity $PULL_ID
+````
+
+
+Inject AZURE_CLIENT_ID so the app selects the Key Vault identity
+````bash
+az containerapp update -n "$APP_NAME" -g "$RESOURCE_GROUP" \
+  --set-env-vars AZURE_CLIENT_ID=$APP_CLIENT_ID \
+  --revision-suffix setappid
+````
+
+
 
 ## 8. Azure Front Door Premium with Private Link (No Public Ingress Required)
 The Container App ingress is internal-only, so in order to expose it we will use **Azure Front Door Premium** using a Private Link origin. This also means that we give our app a global reach through the CDN capabilities of Azure Front Door.
@@ -289,9 +343,10 @@ az afd endpoint create \
 
 Create Origin Group (Health Probe over HTTPS)
 ```bash
-az afd origin-group create -g "$RESOURCE_GROUP" \
+az afd origin-group create \
+  --resource-group "$RESOURCE_GROUP" \
   --profile-name "$FRONTDOOR_NAME" \
-  --name og-aca \
+  --name $AFD_ORIGIN_GROUP \
   --probe-request-type GET \
   --probe-protocol Https \
   --probe-path /healthz \
@@ -301,25 +356,26 @@ az afd origin-group create -g "$RESOURCE_GROUP" \
   --additional-latency-in-milliseconds 0
 ```
 
-Add Private Link Origin for Container App. We need the internal FQDN for the app and we also need the ID of the container app.
+Add Private Link Origin for Container App. We need the internal FQDN for the app and we also need the ID of the container app environment.
 ```bash
 APP_INTERNAL_FQDN=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query properties.configuration.ingress.fqdn -o tsv)
-echo $APP_INTERNAL_FQDN
-CA_ID=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query id -o tsv)
-echo $CA_ID
+ENV_ID=$(az containerapp env show --resource-group $RESOURCE_GROUP --name $ENV_NAME --query "id" --output tsv)
+
 ```
 
 Now, create the origin with Private Link enabled. 
 ```bash
 az afd origin create \
-  -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
-  --origin-group-name og-aca -n aca-origin \
+  --resource-group "$RESOURCE_GROUP" \
+  --profile-name "$FRONTDOOR_NAME" \
+  --origin-name "bapporigin" \
+  --origin-group-name $AFD_ORIGIN_GROUP \
   --host-name $APP_INTERNAL_FQDN \
-  --https-port 443 --http-port 80 \
+  --origin-host-header $APP_INTERNAL_FQDN \
   --priority 1 --weight 100 \
   --enable-private-link true \
-  --private-link-resource $CA_ID \
-  --private-link-sub-resource containerApp \
+  --private-link-resource $ENV_ID \
+  --private-link-sub-resource managedEnvironments \
   --private-link-location "$LOCATION" \
   --private-link-request-message "Front Door access to Container App"
 ```
@@ -340,8 +396,21 @@ az afd route create -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" \
 ### 8.6 Retrieve Front Door Host & Test
 ```bash
 FD_HOST=$(az afd endpoint show -g "$RESOURCE_GROUP" --profile-name "$FRONTDOOR_NAME" -n "$FD_ENDPOINT_NAME" --query hostName -o tsv)
-curl -s https://${FD_HOST}/ | jq
+
 ```
+
+Now, you need to approve the private endpoint connection, so that the container app allows connections from front door.
+````bash
+PEC_ID=$(az network private-endpoint-connection list --id $ENV_ID --query "[0].id" -o tsv)
+az network private-endpoint-connection approve --id $PEC_ID --description "Approve Front Door"
+````
+
+
+curl the endpoint: 
+````bash
+curl -s https://${FD_HOST}/ | jq
+````
+
 
 If you receive 502 initially, the private endpoint may still be provisioning—wait 1–2 minutes and retry.
 
