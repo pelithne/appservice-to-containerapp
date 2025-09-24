@@ -134,7 +134,7 @@ az role assignment create \
 
 
 
-Create the  ACA environment (internal only ingress). If this fails, it could be that the subnet delegation has not completed. If so, wait a minute or two and try again.
+Create the  ACA environment. This can take a couple of minutes.
 ```bash
 az containerapp env create \
   -n "$ENV_NAME" \
@@ -145,7 +145,7 @@ az containerapp env create \
 Retrieve the environment ID. You use this ID to configure the environment.
 ````bash
 
-ENVIRONMENT_ID=$(az containerapp env show \
+ENV_ID=$(az containerapp env show \
     --resource-group $RESOURCE_GROUP \
     --name $ENV_NAME \
     --query "id" \
@@ -156,7 +156,7 @@ Disable public network access for the environment
 
 ````bash
 az containerapp env update \
-    --id $ENVIRONMENT_ID \
+    --id $ENV_ID \
     --public-network-access Disabled
 
 ````
