@@ -132,16 +132,6 @@ Then create the Azure Container registry
 az acr create -n "$ACR_NAME" -g "$RESOURCE_GROUP" --sku Basic --admin-enabled false
 ```
 
-After this, create User Assigned Managed Identity for the container app to be able to access Azure OpenAI
-
-```bash
-az identity create -g "$RESOURCE_GROUP" -n "$UAMI_NAME"
-UAMI_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query id -o tsv)
-UAMI_CLIENT_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query clientId -o tsv)
-UAMI_PRINCIPAL_ID=$(az identity show -g "$RESOURCE_GROUP" -n "$UAMI_NAME" --query principalId -o tsv)
-```
-
-
 ### Create Source Code
 
 What we are doing here is just piping text from the commandline into a few files. Its convenient to do it this way, because we can use the environment varibles defined previously, like ````AOAI_ENDPOINT```` and ````AOAI_API_VERSION````. Less copy-paste. Please spend some time to look at the source code though, or have an LLM like copilot explain it.
@@ -297,8 +287,6 @@ az acr build -r ${ACR_NAME} -t ${IMAGE_NAME}:${IMAGE_TAG} ./openai-api
 az acr repository show-tags -n ${ACR_NAME} --repository ${IMAGE_NAME} -o table
 ```
 
-
-
 ### Crate ACA Environment 
 ```bash
 az containerapp env create -n "$ENV_NAME" -g "$RESOURCE_GROUP" -l "$LOCATION"
@@ -322,6 +310,20 @@ az containerapp create \
 
 
 ```
+
+### Create role assignment
+We need to allow the identity of the container app to access the OpenAI resource. 
+
+````bash
+APP_PRINCIPAL_ID=$(az containerapp show -n "$APP_NAME" -g "$RESOURCE_GROUP" --query identity.principalId -o tsv)
+echo "APP_PRINCIPAL_ID=$APP_PRINCIPAL_ID"
+
+AOAI_RESOURCE_ID=$(az cognitiveservices account show -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" --query id -o tsv)
+az role assignment create \
+  --role "Cognitive Services OpenAI User" \
+  --assignee "$APP_PRINCIPAL_ID" \
+  --scope "$AOAI_RESOURCE_ID"
+````
 
 
 ## Test the Endpoint
