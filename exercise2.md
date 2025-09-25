@@ -55,7 +55,7 @@ az cognitiveservices account create \
 
 az cognitiveservices account show -n "$AOAI_ACCOUNT_NAME" -g "$AOAI_RESOURCE_GROUP" \
   --query '{name:name,location:location,provisioning:properties.provisioningState}' -o table
-```
+````
 
 ### Deploy a Model (Create a Deployment)
 First discover models and versions actually available to YOUR subscription in THIS region (they vary):
