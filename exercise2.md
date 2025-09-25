@@ -318,7 +318,6 @@ az containerapp create \
     AOAI_ENDPOINT="https://${AOAI_ACCOUNT_NAME}.openai.azure.com/" \
     AOAI_DEPLOYMENT="$AOAI_DEPLOYMENT" \
     AOAI_API_VERSION="$AOAI_API_VERSION" \
-    AZURE_CLIENT_ID="$UAMI_CLIENT_ID" \
   --revision-suffix v1
 
 
