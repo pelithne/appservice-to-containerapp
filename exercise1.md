@@ -253,28 +253,6 @@ az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
   --revision-weight "${APP_NAME}--v2=100"
 ````
 
-### (Aside) Revision naming & dynamic lookup
-Container Apps composes revision names as `<app-name>--<revision-suffix>` (double dash). If you omit `--revision-suffix`, an auto‑generated hash style suffix is used. Using explicit suffixes (v1, v2, v3) makes traffic commands readable.
-
-If you ever forget the exact names, list them:
-```bash
-az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" -o table
-```
-
-You can also script grabbing the current “stable” revision (highest weight) then applying a canary automatically:
-```bash
-STABLE=$(az containerapp ingress traffic show -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --query "[?weight==`70`].revisionName" -o tsv)
-NEW=$(az containerapp revision list -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --query "[?contains(name, 'v3')].name" -o tsv)
-echo "Stable=$STABLE New=$NEW"
-az containerapp ingress traffic set -n "$APP_NAME" -g "$RESOURCE_GROUP" \
-  --revision-weight "$STABLE=70" "$NEW=30"
-```
-
-Adjust the 70 to whatever your current stable percentage is (or query for the max weight instead of a literal).
-
-
 ## 8. Logs
 For basic container logging, you can run this command
 
